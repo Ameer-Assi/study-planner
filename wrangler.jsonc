@@ -1,0 +1,17 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "study-planner",
+  "main": "src/worker.js",
+  "compatibility_date": "2025-10-01",
+  "assets": { "directory": "./public" },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "study-planner",
+      "database_id": "8b39120f-8a71-4fa0-a9f4-19e473b0347d"
+    }
+  ],
+  // Every 15 minutes; the Worker checks your reminder times in Israel time.
+  "triggers": { "crons": ["*/15 * * * *"] },
+  "observability": { "enabled": true }
+}
