@@ -1,7 +1,7 @@
 // Study planner server: sync API on D1, plus scheduled reminders over Web Push.
 import { sendPush } from './push.js';
 import {
-  DEFAULT_PLAN, DEFAULT_SETTINGS, COURSES, DAY_NAMES, nowLocal, weekOf, daysBetween,
+  DEFAULT_PLAN, DEFAULT_SETTINGS, COURSES, migratePlan, DAY_NAMES, nowLocal, weekOf, daysBetween,
   overdueItems, remainingToday, required, deadlineStatus, inExamMode, examPrep,
 } from '../public/shared.js';
 
@@ -43,6 +43,15 @@ function putKV(db, key, value, updated) {
 
 async function loadCore(db) {
   const [plan, settings] = await Promise.all([getKV(db, 'plan', DEFAULT_PLAN), getKV(db, 'settings', DEFAULT_SETTINGS)]);
+  // Saved plans pick up new plan updates once, keeping the user's own edits.
+  if (plan.updated) {
+    const m = migratePlan(plan.value);
+    if (m.changed) {
+      const now = Date.now();
+      await putKV(db, 'plan', m.plan, now).run();
+      plan.value = m.plan; plan.updated = now;
+    }
+  }
   return { plan, settings };
 }
 

@@ -53,7 +53,7 @@ let n = 0;
 const it = (course, when, tasks, extra = {}) => ({ id: `t${++n}`, course, when, tasks, optional: false, hw: null, ...extra });
 const cl = (time, course, label) => ({ id: `c${++n}`, time, course, label });
 
-export const DEFAULT_PLAN = {
+const BASE_PLAN = {
   days: [
     { hours: '8:30–20:00',
       classes: [cl('9:30', 'ds', 'DS1 lecture'), cl('12:30', 'ds', 'DS1 tutorial'), cl('13:30', 'qp', 'Quantum tutorial'), cl('15:30', 'org', 'Organization tutorial'), cl('16:30', 'sig', 'Signals lecture')],
@@ -112,6 +112,59 @@ export const DEFAULT_PLAN = {
       ] },
   ],
 };
+
+// ---------- Plan updates ----------
+// Each update runs once on a saved plan. Items get fixed ids so ticks stay attached.
+// Existing targets are only reworded if their text is still the original.
+const review = (id, course) => ({
+  id, course, when: 'evening', optional: false, hw: null,
+  tasks: ['Review today’s lecture: key definitions and formulas in your own words', 'Write down anything you didn’t understand'],
+});
+const PLAN_UPDATES = [
+  {
+    id: 'lecture-review',
+    add: [
+      // [day, item, insert before this id (or null to append)]
+      [0, review('rev-sun-sig', 'sig'), 't11'],
+      [1, review('rev-mon-qp', 'qp'), 't18'],
+      [1, review('rev-mon-sig', 'sig'), null],
+      [2, review('rev-tue-ssd', 'ssd'), null],
+      [3, review('rev-wed-qp', 'qp'), 't33'],
+      [3, review('rev-wed-prob', 'prob'), 't33'],
+    ],
+    reword: [
+      ['t7', ['Review Monday and Wednesday lectures: key equations and what they mean physically'], ['Reread your Quantum notes from Monday and Wednesday before today’s tutorial']],
+      ['t16', ['Review Sunday’s lecture and update your transform table', 'Homework to 30%'], ['Update your transform table', 'Homework to 30%']],
+      ['t22', ['Review Monday’s Quantum lecture'], ['Get ahead on the Organization homework']],
+      ['t36', ['Review Tuesday’s lecture and Wednesday’s session', 'Solve the tutorial problems', 'Homework to 50%'], ['Go over Wednesday’s session', 'Solve the tutorial problems', 'Homework to 50%']],
+    ],
+  },
+];
+
+export function migratePlan(plan) {
+  const p = structuredClone(plan);
+  p.updates ||= [];
+  let changed = false;
+  for (const u of PLAN_UPDATES) {
+    if (p.updates.includes(u.id)) continue;
+    const all = () => p.days.flatMap((d) => d.items);
+    for (const [day, item, before] of u.add) {
+      if (all().some((x) => x.id === item.id)) continue;
+      const items = p.days[day].items;
+      const at = before ? items.findIndex((x) => x.id === before) : -1;
+      if (at >= 0) items.splice(at, 0, structuredClone(item)); else items.push(structuredClone(item));
+    }
+    for (const [id, from, to] of u.reword) {
+      const it = all().find((x) => x.id === id);
+      if (it && JSON.stringify(it.tasks) === JSON.stringify(from)) it.tasks = [...to];
+    }
+    p.updates.push(u.id);
+    changed = true;
+  }
+  return { plan: p, changed };
+}
+
+export const DEFAULT_PLAN = migratePlan(BASE_PLAN).plan;
 
 export const DEFAULT_SETTINGS = {
   reminders: { morning: '08:00', evening: '19:00', weekendMorning: '06:15', weekendEvening: '09:30' },

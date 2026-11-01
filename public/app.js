@@ -3,7 +3,7 @@ import {
   overdueItems, required, deadlineStatus, upcomingExams, inExamMode, examPrep,
 } from './shared.js';
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 
 // ---------- Storage ----------
 const LS = {
