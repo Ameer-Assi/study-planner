@@ -148,6 +148,8 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px
 .dl-due.late { color: var(--bad); }
 .bar { height: 6px; border-radius: 3px; background: var(--sunk); overflow: hidden; margin-top: 6px; }
 .bar i { display: block; height: 100%; background: var(--c, var(--fg)); border-radius: 3px; }
+.daypick { display: flex; flex-wrap: wrap; gap: 6px; }
+.daypick .seg { padding: 7px 13px; font-size: 13px; min-width: 48px; }
 .steps { display: flex; gap: 4px; margin-top: 8px; flex-wrap: wrap; }
 
 /* Stats */

@@ -3,7 +3,7 @@ import {
   overdueItems, required, deadlineStatus, upcomingExams, inExamMode, examPrep,
 } from './shared.js';
 
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 
 // ---------- Storage ----------
 const LS = {
@@ -18,7 +18,7 @@ const store = {
 };
 const ui = {
   view: 'week', day: null, editing: false, editId: null, confirm: null,
-  sync: 'idle', showWeek: false, push: null, msgs: {}, pendingRender: false, lastDate: null,
+  sync: 'idle', showWeek: false, pickDays: [], pendingEdit: null, push: null, msgs: {}, pendingRender: false, lastDate: null,
 };
 const save = () => { LS.set('sp-state', store.state); LS.set('sp-outbox', store.outbox); };
 
@@ -315,7 +315,10 @@ function dayCardHTML() {
             ? `<button type="button" class="btn danger" data-act="del-item" data-id="${esc(it.id)}">Delete</button><button type="button" class="btn ghost" data-act="cancel-confirm">Keep</button>`
             : `<button type="button" class="btn ghost" data-act="confirm" data-key="item-${esc(it.id)}">Delete</button>`}
         </div></li>`).join('')}</ul>
-      ${ui.editId === 'new' ? itemFormHTML(null) : '<div class="row"><button type="button" class="btn" data-act="edit" data-id="new">Add target</button></div>'}
+      ${ui.editId === 'new' ? itemFormHTML(null) : `<div class="row"><button type="button" class="btn" data-act="edit" data-id="new">Add target</button>
+        ${!d.items.length ? '' : ui.confirm === 'clear-day'
+          ? `<button type="button" class="btn danger" data-act="clear-day">Clear all ${d.items.length}</button><button type="button" class="btn ghost" data-act="cancel-confirm">Keep</button>`
+          : '<button type="button" class="btn ghost" data-act="confirm" data-key="clear-day">Clear all targets</button>'}</div>`}
     </section>`;
   }
 
@@ -495,12 +498,7 @@ function viewSettings() {
       </li>`).join('')}</ul>
       <p class="small muted">Ticked exams appear in the countdown and drive exam prep. Tick a Moed B if you’ll take it.</p>
     </section>
-    <section class="card"><h2>Weekly plan</h2>
-      <p class="small muted">Edit any day from the Week screen. Resetting brings back the original plan, but keeps your ticks.</p>
-      <div class="row">${ui.confirm === 'reset-plan'
-        ? '<button type="button" class="btn danger" data-act="reset-plan">Reset the plan</button><button type="button" class="btn ghost" data-act="cancel-confirm">Keep my plan</button>'
-        : '<button type="button" class="btn" data-act="confirm" data-key="reset-plan">Reset to the original plan</button>'}</div>
-    </section>
+    ${resetCardHTML()}
     <section class="card"><h2>This device</h2>
       <div class="row"><button type="button" class="btn" data-act="sync-now">Sync now</button>${syncHTML()}</div>
       ${ui.msgs.sync && ui.sync !== 'ok' ? `<p class="msg err">${esc(ui.msgs.sync)}</p>` : ''}
@@ -509,6 +507,33 @@ function viewSettings() {
         : '<button type="button" class="btn ghost" data-act="confirm" data-key="signout">Sign out</button>'}</div>
       <p class="small muted">Version ${VERSION}. Your data lives in your Cloudflare database and syncs to every device with the app key.</p>
     </section>`;
+}
+
+function resetCardHTML() {
+  const s = store.state;
+  const picked = [...ui.pickDays].sort((a, b) => a - b);
+  const all = picked.length === 7;
+  const count = picked.reduce((a, d) => a + s.plan.days[d].items.length, 0);
+  const dayList = all ? 'every day' : picked.map((d) => DAY_NAMES[d]).join(', ').replace(/, ([^,]*)$/, ' and $1');
+  let actions;
+  if (ui.confirm === 'clear-days') {
+    actions = `<p class="small">Remove ${plural(count, 'target')} from ${esc(dayList)}? Classes stay. You’ll go straight to adding new ones.</p>
+      <div class="row"><button type="button" class="btn danger" data-act="clear-days">Clear targets</button><button type="button" class="btn ghost" data-act="cancel-confirm">Cancel</button></div>`;
+  } else if (ui.confirm === 'restore-days') {
+    actions = `<p class="small">Replace the targets on ${esc(dayList)} with the original plan’s targets?</p>
+      <div class="row"><button type="button" class="btn danger" data-act="restore-days">Restore originals</button><button type="button" class="btn ghost" data-act="cancel-confirm">Cancel</button></div>`;
+  } else {
+    actions = `<div class="row"><button type="button" class="btn" data-act="confirm-days" data-key="clear-days">Clear targets</button><button type="button" class="btn ghost" data-act="confirm-days" data-key="restore-days">Restore originals</button></div>`;
+  }
+  return `<section class="card"><h2>Reset targets</h2>
+    <p class="small muted">Pick days, then clear their targets to write new ones, or bring back the original targets. Classes and your ticks from past weeks stay.</p>
+    <div class="daypick" role="group" aria-label="Days to reset">
+      <button type="button" class="seg" data-act="pick-day" data-day="all" aria-pressed="${all}">All</button>
+      ${DAY_NAMES.map((n, i) => `<button type="button" class="seg" data-act="pick-day" data-day="${i}" aria-pressed="${picked.includes(i)}">${n.slice(0, 3)}</button>`).join('')}
+    </div>
+    ${actions}
+    ${ui.msgs.reset ? `<p class="msg err">${esc(ui.msgs.reset)}</p>` : ''}
+  </section>`;
 }
 
 // ---------- Setup ----------
@@ -707,7 +732,40 @@ document.addEventListener('click', async (e) => {
     case 'progress': { const d = s.deadlines[el.dataset.id]; commit({ type: 'deadline', ...d, progress: +el.dataset.v }); break; }
     case 'del-deadline': { const d = s.deadlines[el.dataset.id]; ui.confirm = null; commit({ type: 'deadline', ...d, deleted: true }); toast('Deadline deleted'); break; }
 
-    case 'reset-plan': ui.confirm = null; commit({ type: 'plan', plan: structuredClone(DEFAULT_PLAN) }); toast('Plan reset'); break;
+    case 'pick-day': {
+      const v = el.dataset.day;
+      if (v === 'all') ui.pickDays = ui.pickDays.length === 7 ? [] : [0, 1, 2, 3, 4, 5, 6];
+      else { const d = +v; ui.pickDays = ui.pickDays.includes(d) ? ui.pickDays.filter((x) => x !== d) : [...ui.pickDays, d]; }
+      ui.confirm = null; ui.msgs.reset = null; render();
+      break;
+    }
+    case 'confirm-days':
+      if (!ui.pickDays.length) { ui.msgs.reset = 'Pick at least one day first.'; render(); break; }
+      ui.msgs.reset = null; ui.confirm = el.dataset.key; render();
+      break;
+    case 'clear-days': {
+      const days = [...ui.pickDays].sort((a, b) => a - b);
+      ui.confirm = null; ui.pickDays = [];
+      commitPlan((p) => { for (const d of days) p.days[d].items = []; });
+      toast(days.length === 7 ? 'All targets cleared' : 'Targets cleared');
+      ui.pendingEdit = { day: days[0] };
+      location.hash = '#week';
+      break;
+    }
+    case 'restore-days': {
+      const days = [...ui.pickDays];
+      ui.confirm = null; ui.pickDays = [];
+      commitPlan((p) => { for (const d of days) p.days[d].items = structuredClone(DEFAULT_PLAN.days[d].items); });
+      toast('Original targets restored');
+      break;
+    }
+    case 'clear-day': {
+      const day = ui.day;
+      ui.confirm = null;
+      commitPlan((p) => { p.days[day].items = []; });
+      ui.editId = 'new'; render();
+      break;
+    }
     case 'sync-now': ui.msgs.sync = null; await pull(); toast(ui.sync === 'ok' ? 'Synced' : 'Couldn’t sync'); break;
     case 'signout':
       if (ui.push === 'on') await pushOff();
@@ -783,6 +841,9 @@ function route() {
   ui.view = ['week', 'deadlines', 'stats', 'settings', 'setup'].includes(v) ? v : 'week';
   ui.confirm = null; ui.editId = null;
   if (ui.view !== 'week') ui.editing = false;
+  if (ui.view === 'week' && ui.pendingEdit) {
+    ui.day = ui.pendingEdit.day; ui.editing = true; ui.editId = 'new'; ui.pendingEdit = null;
+  }
   if (ui.view === 'settings') refreshPushState().then(render);
   render();
   scrollTo(0, 0);
