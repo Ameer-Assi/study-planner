@@ -1,7 +1,7 @@
 // Study planner server: sync API on D1, plus scheduled reminders over Web Push.
 import { sendPush } from './push.js';
 import {
-  DEFAULT_PLAN, DEFAULT_SETTINGS, COURSES, migratePlan, DAY_NAMES, nowLocal, weekOf, daysBetween,
+  DEFAULT_PLAN, DEFAULT_SETTINGS, COURSES, migratePlan, openGoals, GOAL_FLAG_DOW, DAY_NAMES, nowLocal, weekOf, daysBetween,
   overdueItems, remainingToday, required, deadlineStatus, inExamMode, examPrep,
 } from '../public/shared.js';
 
@@ -88,9 +88,11 @@ async function handleSync(request, env) {
     if (!op || !isNum(op.updated)) continue;
     if (op.type === 'tick' && isStr(op.week, 40) && isStr(op.item, 80)) {
       const effort = op.effort === -1 || op.effort === 0 || op.effort === 1 ? op.effort : null;
+      // Weekly goals send a count; everything else is done / not done.
+      const done = isNum(op.count) ? Math.max(0, Math.min(999, Math.round(op.count))) : op.done ? 1 : 0;
       stmts.push(db.prepare(
         'INSERT INTO ticks (week, item, done, effort, updated) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(week, item) DO UPDATE SET done = excluded.done, effort = excluded.effort, updated = excluded.updated WHERE excluded.updated >= ticks.updated',
-      ).bind(op.week, op.item, op.done ? 1 : 0, effort, op.updated));
+      ).bind(op.week, op.item, done, effort, op.updated));
     } else if (op.type === 'deadline' && isStr(op.id, 80) && isStr(op.course, 20) && isStr(op.title, 200) && isStr(op.due, 10)) {
       const progress = Math.max(0, Math.min(100, Math.round(+op.progress || 0)));
       stmts.push(db.prepare(
@@ -148,7 +150,7 @@ export async function buildReminder(env, when, slot) {
   const dow = when.dow;
   const week = weekOf(today);
   const { results } = await db.prepare('SELECT item, done FROM ticks WHERE week = ?').bind(week).all();
-  const wt = Object.fromEntries(results.map((r) => [r.item, { done: !!r.done }]));
+  const wt = Object.fromEntries(results.map((r) => [r.item, { done: r.done }]));
   const dls = (await db.prepare('SELECT course, title, due, progress FROM deadlines WHERE deleted = 0').all()).results;
   const urgent = dls.filter((d) => ['soon', 'late'].includes(deadlineStatus(d, today)));
 
@@ -163,14 +165,16 @@ export async function buildReminder(env, when, slot) {
   if (slot === 'morning') {
     const todays = required(plan.days[dow].items);
     const behind = overdueItems(plan, wt, dow);
+    const goals = dow >= GOAL_FLAG_DOW ? openGoals(plan, wt, week) : [];
     const lines = [];
     if (todays.length) lines.push(names(todays));
     if (behind.length) lines.push(`${behind.length} behind from earlier this week`);
+    if (goals.length) lines.push(`${goals.length} weekly goal${goals.length === 1 ? '' : 's'} open`);
     for (const d of urgent.slice(0, 2)) {
       const left = daysBetween(today, d.due);
       lines.push(`${d.title}: ${left < 0 ? 'overdue' : left === 0 ? 'due today' : left === 1 ? 'due tomorrow' : `due in ${left} days`}, at ${d.progress}%`);
     }
-    if (!todays.length && !behind.length && !urgent.length) return null;
+    if (!todays.length && !behind.length && !urgent.length && !goals.length) return null;
     return { title: `${DAY_NAMES[dow]}: ${todays.length} target${todays.length === 1 ? '' : 's'}`, body: lines.join(' · '), tag: 'morning' };
   }
 

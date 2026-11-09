@@ -250,3 +250,16 @@ export function examPrep(settings, today) {
   }
   return { exam: next, daysLeft, phase, tasks, start, total, index };
 }
+
+// ---------- Weekly goals ----------
+// Goals live in plan.goals. Recurring goals show every week from startWeek on;
+// one-off goals belong to a single week. Progress is a count stored in ticks.
+export const GOAL_SOFT_CAP = 5;
+export const GOAL_FLAG_DOW = 4; // unfinished goals are flagged from Thursday
+
+export function activeGoals(plan, week) {
+  return (plan.goals || []).filter((g) => !g.dropped && (g.recurring ? (g.startWeek || '') <= week : g.week === week));
+}
+export const goalCount = (weekTicks, g) => Math.max(0, +(weekTicks?.[g.id]?.done || 0));
+export const goalDone = (weekTicks, g) => goalCount(weekTicks, g) >= (g.target || 1);
+export const openGoals = (plan, weekTicks, week) => activeGoals(plan, week).filter((g) => !goalDone(weekTicks, g));

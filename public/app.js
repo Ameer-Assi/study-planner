@@ -1,9 +1,10 @@
 import {
   COURSES, TRACKED, DAY_NAMES, DEFAULT_PLAN, nowLocal, addDays, daysBetween, weekOf, fmtShortDate,
   overdueItems, required, deadlineStatus, upcomingExams, inExamMode, examPrep,
+  activeGoals, goalCount, goalDone, GOAL_SOFT_CAP, GOAL_FLAG_DOW,
 } from './shared.js';
 
-const VERSION = '1.2.0';
+const VERSION = '1.3.0';
 
 // ---------- Storage ----------
 const LS = {
@@ -18,7 +19,7 @@ const store = {
 };
 const ui = {
   view: 'week', day: null, editing: false, editId: null, confirm: null,
-  sync: 'idle', showWeek: false, pickDays: [], pendingEdit: null, push: null, msgs: {}, pendingRender: false, lastDate: null,
+  sync: 'idle', showWeek: false, pickDays: [], pendingEdit: null, goalEdit: false, goalForm: null, push: null, msgs: {}, pendingRender: false, lastDate: null,
 };
 const save = () => { LS.set('sp-state', store.state); LS.set('sp-outbox', store.outbox); };
 
@@ -76,7 +77,7 @@ async function api(path, { method = 'GET', body } = {}) {
 
 function fromServer(d) {
   const ticks = {};
-  for (const t of d.ticks) (ticks[t.week] ||= {})[t.item] = { done: !!t.done, effort: t.effort, updated: t.updated };
+  for (const t of d.ticks) (ticks[t.week] ||= {})[t.item] = { done: t.done, effort: t.effort, updated: t.updated };
   const deadlines = {};
   for (const x of d.deadlines) deadlines[x.id] = { ...x, deleted: !!x.deleted };
   return {
@@ -345,6 +346,99 @@ function examCardHTML() {
   </section>`;
 }
 
+const ICON_FLAG = '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 21V4M5 4h11l-2 4 2 4H5"/></svg>';
+
+function goalFormHTML(g) {
+  const isNew = !g;
+  g ||= { title: '', course: '', target: 1, recurring: false };
+  const { week } = clock();
+  const n = activeGoals(store.state.plan, week).length;
+  return `<div class="editbox" data-form="goal" data-id="${isNew ? 'new' : esc(g.id)}">
+    <label class="field"><span>Goal</span><input type="text" id="g-title" value="${esc(g.title)}" placeholder="Watch the missed Signals recording"></label>
+    <div class="row">
+      <label class="field"><span>Course</span><select id="g-course"><option value="">General</option>${TRACKED.map((k) => `<option value="${k}"${k === g.course ? ' selected' : ''}>${esc(COURSES[k].name)}</option>`).join('')}</select></label>
+      <label class="field" style="max-width:110px"><span>Times</span><input type="number" id="g-target" min="1" max="99" step="1" value="${g.target || 1}"></label>
+    </div>
+    <label class="toggle"><input type="checkbox" id="g-rec"${g.recurring ? ' checked' : ''}> Repeat every week</label>
+    ${isNew && n >= GOAL_SOFT_CAP ? `<p class="small" style="color:var(--warn)">You already have ${n} goals this week. Past five, goals usually work better as targets on a specific day.</p>` : ''}
+    <p class="msg err" id="g-err" hidden></p>
+    <div class="row end"><button type="button" class="btn ghost" data-act="goal-cancel">Cancel</button><button type="button" class="btn primary" data-act="goal-save">${isNew ? 'Add goal' : 'Save'}</button></div>
+  </div>`;
+}
+
+function goalRowHTML(g, week) {
+  const wt = store.state.ticks[week];
+  const n = goalCount(wt, g), target = g.target || 1, done = goalDone(wt, g);
+  const meta = `<div class="meta">${g.course ? sw(g.course) + `<span class="c">${esc(cname(g.course))}</span>` : ''}${g.recurring ? '<span class="tag">every week</span>' : ''}</div>`;
+  const title = `<div class="goal-title">${esc(g.title)}</div>`;
+  if (ui.goalEdit) {
+    if (ui.goalForm === g.id) return `<li style="display:block">${goalFormHTML(g)}</li>`;
+    return `<li class="item"><div class="item-body">${meta}${title}</div>
+      <div class="row" style="flex-direction:column;gap:2px">
+        <button type="button" class="btn ghost" data-act="goal-edit" data-id="${esc(g.id)}">Edit</button>
+        ${ui.confirm === 'goal-' + g.id
+          ? `<button type="button" class="btn danger" data-act="goal-delete" data-id="${esc(g.id)}">Delete</button><button type="button" class="btn ghost" data-act="cancel-confirm">Keep</button>`
+          : `<button type="button" class="btn ghost" data-act="confirm" data-key="goal-${esc(g.id)}">Delete</button>`}
+      </div></li>`;
+  }
+  if (target === 1) {
+    return `<li class="item${done ? ' done' : ''}">
+      <input type="checkbox" class="check" id="goal-${esc(g.id)}" data-act="goal-check" data-id="${esc(g.id)}"${done ? ' checked' : ''} aria-label="${esc(g.title)}">
+      <div class="item-body">${meta}${title}</div></li>`;
+  }
+  return `<li class="item${done ? ' done' : ''}">
+    <div class="counter-n mono" aria-label="${n} of ${target}">${Math.min(n, target)}/${target}</div>
+    <div class="item-body">${meta}${title}
+      <div class="bar" style="--c:var(--${esc(g.course || 'fg')})"><i style="width:${Math.min(100, Math.round(100 * n / target))}%"></i></div></div>
+    <div class="row" style="gap:4px;flex-wrap:nowrap">
+      <button type="button" class="btn ghost" data-act="goal-step" data-id="${esc(g.id)}" data-v="-1" aria-label="One less"${n === 0 ? ' disabled' : ''}>−1</button>
+      <button type="button" class="btn" data-act="goal-step" data-id="${esc(g.id)}" data-v="1" aria-label="One more">+1</button>
+    </div></li>`;
+}
+
+function goalsCardHTML() {
+  const s = store.state;
+  const { week, dow } = clock();
+  const goals = activeGoals(s.plan, week);
+  const wt = s.ticks[week];
+  const open = goals.filter((g) => !goalDone(wt, g));
+  const flagged = dow >= GOAL_FLAG_DOW && open.length && !ui.goalEdit;
+  const head = flagged
+    ? `<h2>${ICON_FLAG}This week · ${plural(open.length, 'goal')} open</h2>`
+    : `<h2>This week</h2>`;
+  let body;
+  if (!goals.length && !ui.goalForm) {
+    body = `<p class="small muted">Goals that don’t belong to a specific day, like watching a missed recording or going to office hours.</p>
+      <div class="row"><button type="button" class="btn" data-act="goal-new">Add a weekly goal</button></div>`;
+  } else {
+    body = `${goals.length ? `<ul class="items">${goals.map((g) => goalRowHTML(g, week)).join('')}</ul>` : ''}
+      ${ui.goalForm === 'new' ? goalFormHTML(null) : `<div class="row"><button type="button" class="btn ghost" data-act="goal-new">Add goal</button></div>`}
+      ${flagged ? '<p class="small muted">Thursday’s catch-up block is a good time for these.</p>' : ''}`;
+  }
+  return `<section class="card${flagged ? ' alert' : ''}">
+    <div class="card-head">${head}
+      <div class="row">${goals.length ? `<span class="mono small muted">${goals.length - open.length}/${goals.length}</span>` : ''}
+      ${goals.length ? `<button type="button" class="btn ghost" data-act="goal-mode">${ui.goalEdit ? 'Done' : 'Edit'}</button>` : ''}</div></div>
+    ${body}
+  </section>`;
+}
+
+function goalLeftoversHTML() {
+  const s = store.state;
+  const { week } = clock();
+  const prev = addDays(week, -7);
+  const left = (s.plan.goals || []).filter((g) => !g.recurring && !g.dropped && g.week === prev && !goalDone(s.ticks[prev], g));
+  if (!left.length) return '';
+  return `<section class="card alert"><h2>${ICON_FLAG}Unfinished goals from last week</h2>
+    <ul class="list">${left.map((g) => {
+      const n = goalCount(s.ticks[prev], g);
+      return `<li><div class="grow"><div class="goal-title">${esc(g.title)}</div>
+        <div class="small muted">${g.course ? esc(cname(g.course)) + ' · ' : ''}${g.target > 1 ? `${n}/${g.target} done` : 'not done'}</div></div>
+        <div class="row" style="gap:4px"><button type="button" class="btn" data-act="goal-carry" data-id="${esc(g.id)}">Move to this week</button>
+        <button type="button" class="btn ghost" data-act="goal-drop" data-id="${esc(g.id)}">Drop</button></div></li>`;
+    }).join('')}</ul></section>`;
+}
+
 function viewWeek() {
   const s = store.state;
   const { today, dow } = clock();
@@ -356,7 +450,7 @@ function viewWeek() {
     h += examCardHTML();
     if (!ui.showWeek) return h;
   }
-  h += alertsHTML() + tabsHTML() + dayCardHTML();
+  h += alertsHTML() + goalLeftoversHTML() + goalsCardHTML() + tabsHTML() + dayCardHTML();
   return h;
 }
 
@@ -409,6 +503,12 @@ function viewStats() {
     return Math.round(100 * ids.filter((id) => t[id]?.done).length / ids.length);
   };
   const allReq = Object.values(reqBy).flat();
+  const goalWeeks = weeks.map((w) => {
+    const g = activeGoals(s.plan, w); if (!g.length) return null;
+    return Math.round(100 * g.filter((x) => goalDone(s.ticks[w], x)).length / g.length);
+  });
+  const thisGoals = activeGoals(s.plan, week);
+  const thisGoalsDone = thisGoals.filter((x) => goalDone(s.ticks[week], x)).length;
   const thisDone = allReq.filter((id) => s.ticks[week]?.[id]?.done).length;
   const used = weeks.filter((w) => s.ticks[w] && Object.keys(s.ticks[w]).length);
   const courses = TRACKED.filter((c) => reqBy[c]);
@@ -433,7 +533,8 @@ function viewStats() {
 
   return headerHTML('Stats', 'Required targets only') + `
     <section class="card"><p class="label">This week</p>
-      <div class="stats-row"><div><div class="big">${allReq.length ? Math.round(100 * thisDone / allReq.length) : 0}%</div><div class="small muted">${thisDone} of ${allReq.length} targets</div></div></div>
+      <div class="stats-row"><div><div class="big">${allReq.length ? Math.round(100 * thisDone / allReq.length) : 0}%</div><div class="small muted">${thisDone} of ${allReq.length} targets</div></div>
+      ${thisGoals.length ? `<div><div class="big">${thisGoalsDone}/${thisGoals.length}</div><div class="small muted">weekly goals</div></div>` : ''}</div>
     </section>
     <section class="card"><h2>Completion by course</h2>
       <div style="overflow-x:auto"><div class="chart" style="--n:${weeks.length}">
@@ -441,9 +542,13 @@ function viewStats() {
           const p = pct(c, w) ?? 0;
           return `<span class="cell${w === week ? ' now' : ''}" title="${esc(cname(c))}, week of ${fmtShortDate(w)}: ${p}%" style="--c:var(--${c})"><i style="height:${p}%"></i></span>`;
         }).join('')}`).join('')}
+        ${goalWeeks.some((x) => x != null) ? `<span class="rl">Goals</span>${weeks.map((w, k) => {
+          const p = goalWeeks[k];
+          return `<span class="cell${w === week ? ' now' : ''}" title="Weekly goals, week of ${fmtShortDate(w)}: ${p == null ? 'none' : p + '%'}" style="--c:var(--fg)"><i style="height:${p ?? 0}%"></i></span>`;
+        }).join('')}` : ''}
         <span></span>${weeks.map((w) => `<span class="wk">${fmtShortDate(w).split(' ')[0]}</span>`).join('')}
       </div></div>
-      <p class="small muted">Each column is a week, labeled by its Sunday. The outlined column is this week.</p>
+      <p class="small muted">Each column is a week, labeled by its Sunday. The outlined column is this week.${goalWeeks.some((x) => x != null) ? ' The Goals row is the share of weekly goals finished.' : ''}</p>
       ${courses.some((c) => avg(c) != null) ? `<p class="small">Last 3 weeks: ${courses.map((c) => `${COURSES[c].short} ${avg(c) ?? '–'}%`).join(' · ')}</p>` : ''}
     </section>
     <section class="card"><h2>Effort, last 4 weeks</h2>
@@ -732,6 +837,57 @@ document.addEventListener('click', async (e) => {
     case 'progress': { const d = s.deadlines[el.dataset.id]; commit({ type: 'deadline', ...d, progress: +el.dataset.v }); break; }
     case 'del-deadline': { const d = s.deadlines[el.dataset.id]; ui.confirm = null; commit({ type: 'deadline', ...d, deleted: true }); toast('Deadline deleted'); break; }
 
+    case 'goal-new': ui.goalForm = 'new'; ui.confirm = null; render(); document.getElementById('g-title')?.focus(); break;
+    case 'goal-mode': ui.goalEdit = !ui.goalEdit; ui.goalForm = null; ui.confirm = null; render(); break;
+    case 'goal-edit': ui.goalForm = el.dataset.id; ui.confirm = null; render(); break;
+    case 'goal-cancel': document.activeElement?.blur(); ui.goalForm = null; render(); break;
+    case 'goal-save': {
+      const box = el.closest('[data-form=goal]');
+      const title = box.querySelector('#g-title').value.trim();
+      if (!title) { const m = box.querySelector('#g-err'); m.textContent = 'Write what the goal is.'; m.hidden = false; return; }
+      const data = {
+        title, course: box.querySelector('#g-course').value,
+        target: Math.max(1, Math.min(99, Math.round(+box.querySelector('#g-target').value) || 1)),
+        recurring: box.querySelector('#g-rec').checked,
+      };
+      const id = box.dataset.id; const { week } = clock();
+      document.activeElement?.blur();
+      commitPlan((p) => {
+        p.goals ||= [];
+        if (id === 'new') p.goals.push({ id: uid(), ...data, startWeek: week, week, dropped: false });
+        else {
+          const g = p.goals.find((x) => x.id === id);
+          Object.assign(g, data);
+          if (!data.recurring) g.week = week; else g.startWeek = g.startWeek || week;
+        }
+      });
+      ui.goalForm = null; render(); toast(id === 'new' ? 'Goal added' : 'Goal saved');
+      break;
+    }
+    case 'goal-delete': {
+      const id = el.dataset.id; ui.confirm = null;
+      commitPlan((p) => { p.goals = (p.goals || []).filter((x) => x.id !== id); });
+      toast('Goal deleted');
+      break;
+    }
+    case 'goal-step': {
+      const g = activeGoals(s.plan, clock().week).find((x) => x.id === el.dataset.id); if (!g) break;
+      const { week } = clock();
+      const n = Math.max(0, goalCount(s.ticks[week], g) + +el.dataset.v);
+      commit({ type: 'tick', week, item: g.id, done: n, count: n, effort: null });
+      if (n === (g.target || 1) && +el.dataset.v > 0) toast('Goal done');
+      break;
+    }
+    case 'goal-carry': {
+      const { week } = clock(); const prev = addDays(week, -7);
+      const g = s.plan.goals.find((x) => x.id === el.dataset.id);
+      const n = goalCount(s.ticks[prev], g);
+      commitPlan((p) => { p.goals.find((x) => x.id === g.id).week = week; });
+      if (n) commit({ type: 'tick', week, item: g.id, done: n, count: n, effort: null });
+      toast('Moved to this week');
+      break;
+    }
+    case 'goal-drop': commitPlan((p) => { p.goals.find((x) => x.id === el.dataset.id).dropped = true; }); toast('Goal dropped'); break;
     case 'pick-day': {
       const v = el.dataset.day;
       if (v === 'all') ui.pickDays = ui.pickDays.length === 7 ? [] : [0, 1, 2, 3, 4, 5, 6];
@@ -815,6 +971,9 @@ document.addEventListener('change', (e) => {
       const it = s.plan.days.flatMap((d) => d.items).find((x) => x.id === item);
       if (it?.hw != null) bumpDeadline(it.course, it.hw);
     }
+  } else if (act === 'goal-check') {
+    const { week } = clock(); const n = el.checked ? 1 : 0;
+    commit({ type: 'tick', week, item: el.dataset.id, done: n, count: n, effort: null });
   } else if (act === 'hours') {
     const v = el.value.trim(); const day = ui.day;
     commitPlan((p) => { p.days[day].hours = v; });
