@@ -277,10 +277,10 @@ export function deadlinesOf(deadlines, item) {
 }
 
 // Optional targets tied to a kind of homework (Moodle, prep, WeBWorK) only apply
-// when a deadline of that kind falls within a week after the target's day.
+// when an unfinished deadline of that kind falls within a week after the target's day.
 export function targetOpen(deadlines, item, date) {
   if (!item.optional || !item.match) return true;
-  return deadlinesOf(deadlines, item).some((d) => { const n = daysBetween(date, d.due); return n >= 0 && n <= 7; });
+  return deadlinesOf(deadlines, item).some((d) => { const n = daysBetween(date, d.due); return d.progress < 100 && n >= 0 && n <= 7; });
 }
 
 // The unfinished deadline that falls on a homework target's own day, if there is one.
@@ -329,6 +329,11 @@ export const DEADLINE_SEEDS = [
       dl('s-prob-w11', 'prob', 'Written HW 11', '2027-01-28'),
       dl('s-org-hw1', 'org', 'HW1 wet: basic assembly', '2026-11-24'),
     ],
+  },
+  {
+    // Progress reported on 14 Nov 2026. Only raises progress, never lowers it.
+    id: 'progress-2026-11-14',
+    progress: [['s-prob-ww1', 100], ['s-prob-ww2', 100], ['s-qp-m3', 100], ['s-org-hw1', 100]],
   },
 ];
 
