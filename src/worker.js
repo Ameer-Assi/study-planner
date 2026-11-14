@@ -63,9 +63,12 @@ async function seedDeadlines(db) {
     if (await db.prepare('SELECT 1 FROM kv WHERE key = ?').bind(key).first()) continue;
     const now = Date.now();
     await db.batch([
-      ...set.items.filter((d) => d.due >= today).map((d) => db.prepare(
+      ...(set.items || []).filter((d) => d.due >= today).map((d) => db.prepare(
         'INSERT OR IGNORE INTO deadlines (id, course, title, due, progress, deleted, updated) VALUES (?1, ?2, ?3, ?4, 0, 0, ?5)',
       ).bind(d.id, d.course, d.title, d.due, now)),
+      ...(set.progress || []).map(([id, p]) => db.prepare(
+        'UPDATE deadlines SET progress = ?2, updated = ?3 WHERE id = ?1 AND progress < ?2',
+      ).bind(id, p, now)),
       putKV(db, key, true, now),
     ]);
   }

@@ -4,7 +4,7 @@ import {
   activeGoals, goalCount, goalDone, GOAL_SOFT_CAP, GOAL_FLAG_DOW,
 } from './shared.js';
 
-const VERSION = '1.5.0';
+const VERSION = '1.5.1';
 
 // ---------- Storage ----------
 const LS = {
