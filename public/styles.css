@@ -157,6 +157,22 @@ input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px
 .daypick .seg { padding: 7px 13px; font-size: 13px; min-width: 48px; }
 .steps { display: flex; gap: 4px; margin-top: 8px; flex-wrap: wrap; }
 
+/* Homework ladders */
+.hw { display: grid; grid-template-columns: minmax(0, 1fr) repeat(7, 27px); gap: 5px 2px; align-items: center; }
+.hw .hd { font-family: var(--mono); font-size: 11px; color: var(--muted); text-align: center; }
+.hw .hd.today { color: var(--fg); font-weight: 500; text-decoration: underline; text-underline-offset: 3px; }
+.hw .nm { min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
+.hw .nm b { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 6px; min-width: 0; }
+.hw .nm b span:last-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hw .nm .dl-due { font-size: 11px; padding-left: 16px; white-space: nowrap; }
+.hw .cell { height: 28px; padding: 0; border-radius: 7px; border: 1px solid transparent; background: var(--sunk); color: var(--muted); font-family: var(--mono); font-size: 11px; cursor: pointer; display: grid; place-items: center; }
+.hw .cell.opt { background: none; border: 1px dashed var(--muted); }
+.hw .cell.today { background: var(--surface); border: 2px solid var(--fg); color: var(--fg); font-weight: 500; }
+.hw .cell.missed { background: var(--warn-bg); border-color: var(--warn); color: var(--warn); font-weight: 500; }
+.hw .cell.done { background: var(--c); border-color: var(--c); color: var(--bg); font-weight: 500; }
+.hw .cell:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
+.tag.due { border: 1px solid var(--warn); color: var(--warn); font-weight: 500; }
+
 /* Stats */
 .chart { display: grid; grid-template-columns: 52px repeat(var(--n), minmax(0, 1fr)); gap: 4px 4px; align-items: end; }
 .chart .rl { font-size: 12px; font-weight: 600; align-self: center; }

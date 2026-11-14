@@ -1,7 +1,7 @@
 // Study planner server: sync API on D1, plus scheduled reminders over Web Push.
 import { sendPush } from './push.js';
 import {
-  DEFAULT_PLAN, DEFAULT_SETTINGS, COURSES, migratePlan, openGoals, GOAL_FLAG_DOW, DAY_NAMES, nowLocal, weekOf, daysBetween,
+  DEFAULT_PLAN, DEFAULT_SETTINGS, DEADLINE_SEEDS, COURSES, migratePlan, openGoals, GOAL_FLAG_DOW, DAY_NAMES, nowLocal, weekOf, daysBetween,
   overdueItems, remainingToday, required, deadlineStatus, inExamMode, examPrep,
 } from '../public/shared.js';
 
@@ -55,9 +55,26 @@ async function loadCore(db) {
   return { plan, settings };
 }
 
+// Published due dates are added to the deadline list once per set.
+async function seedDeadlines(db) {
+  const today = nowLocal().date;
+  for (const set of DEADLINE_SEEDS) {
+    const key = `seed:${set.id}`;
+    if (await db.prepare('SELECT 1 FROM kv WHERE key = ?').bind(key).first()) continue;
+    const now = Date.now();
+    await db.batch([
+      ...set.items.filter((d) => d.due >= today).map((d) => db.prepare(
+        'INSERT OR IGNORE INTO deadlines (id, course, title, due, progress, deleted, updated) VALUES (?1, ?2, ?3, ?4, 0, 0, ?5)',
+      ).bind(d.id, d.course, d.title, d.due, now)),
+      putKV(db, key, true, now),
+    ]);
+  }
+}
+
 async function handleState(env, url) {
   const db = env.DB;
   const { plan, settings } = await loadCore(db);
+  await seedDeadlines(db);
   const weeks = Math.min(30, Math.max(1, +(url.searchParams.get('weeks') || 12)));
   const since = weekOf(addDaysSafe(nowLocal().date, -7 * (weeks - 1)));
   const [ticks, deadlines] = await Promise.all([
@@ -163,8 +180,8 @@ export async function buildReminder(env, when, slot) {
   }
 
   if (slot === 'morning') {
-    const todays = required(plan.days[dow].items);
-    const behind = overdueItems(plan, wt, dow);
+    const todays = required(plan.days[dow].items, week);
+    const behind = overdueItems(plan, wt, dow, week);
     const goals = dow >= GOAL_FLAG_DOW ? openGoals(plan, wt, week) : [];
     const lines = [];
     if (todays.length) lines.push(names(todays));
@@ -178,7 +195,7 @@ export async function buildReminder(env, when, slot) {
     return { title: `${DAY_NAMES[dow]}: ${todays.length} target${todays.length === 1 ? '' : 's'}`, body: lines.join(' · '), tag: 'morning' };
   }
 
-  const left = remainingToday(plan, wt, dow);
+  const left = remainingToday(plan, wt, dow, week);
   if (!left.length) return null;
   return { title: `${left.length} target${left.length === 1 ? '' : 's'} left today`, body: names(left), tag: 'evening' };
 }
