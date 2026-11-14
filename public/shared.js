@@ -120,6 +120,7 @@ const review = (id, course) => ({
   id, course, when: 'evening', optional: false, hw: null,
   tasks: ['Review today’s lecture: key definitions and formulas in your own words', 'Write down anything you didn’t understand'],
 });
+const hw = (id, course, when, pct, tasks, extra = {}) => ({ id, course, when, tasks, optional: false, hw: pct, ...extra });
 const PLAN_UPDATES = [
   {
     id: 'lecture-review',
@@ -139,7 +140,51 @@ const PLAN_UPDATES = [
       ['t36', ['Review Tuesday’s lecture and Wednesday’s session', 'Solve the tutorial problems', 'Homework to 50%'], ['Go over Wednesday’s session', 'Solve the tutorial problems', 'Homework to 50%']],
     ],
   },
+  {
+    // Homework ladders rebuilt around each course's real rules (Nov 2026):
+    // Solid state, Signals and the Quantum dry sheet are due Thursday; Fri and Sat are short days.
+    id: 'homework-rules-2026-11',
+    since: '2026-11-15',
+    remove: ['t6', 't15', 't22', 't29', 't34', 't43'],
+    hours: [
+      // [day, values it may still have, new value]
+      [4, ['8:30–20:00 · no classes'], '9:00–20:00 · no classes'],
+      [5, ['6:15–10:00'], 'up to 2 hours'],
+      [6, ['6:15–10:00'], 'up to 3 hours'],
+    ],
+    put: [
+      // [day, item, insert before this id]. No third value: an existing item keeps its place.
+      [0, hw('t11', 'ssd', 'evening', 25, ['Reread Tuesday and Wednesday notes', 'Prep exercise as a warm-up, then homework to 25%', 'Update the formula sheet'])],
+      [1, hw('hw-mon-ww', 'prob', 'evening', 50, ['WeBWorK to 50%, when a sheet is open'], { optional: true, match: 'webwork' }), 'rev-mon-sig'],
+      [2, hw('hw-tue-qpm', 'qp', '10:30 gap', 100, ['Moodle exercise to 100%, when one is open (due Wednesday)'], { optional: true, match: 'moodle' }), 't23'],
+      [2, hw('hw-tue-qp', 'qp', '10:30 gap', 70, ['Dry sheet to 70%'], { match: 'dry' }), 't23'],
+      [2, hw('hw-tue-ssd', 'ssd', '14:30 gap', 50, ['Homework to 50%, before the tutorial']), 't23'],
+      [3, hw('t32', 'prob', '12:30–15:30 gap', 40, ['Re-solve the tutorial examples', 'Written sheet to 40%: sheets 2, 5, 7, 9 and 11 in full, the others selected questions'], { match: 'written' })],
+      [4, hw('t36', 'ssd', 'morning', 100, ['Go over Wednesday’s session', 'Homework to 100% and submit (due Thursday)']), 't35'],
+      [4, hw('t38', 'sig', 'late morning', 100, ['Homework to 100% and submit with your partner (due Thursday)']), 't35'],
+      [4, hw('t37', 'qp', 'early afternoon', 100, ['Solve the tutorial problems', 'Dry sheet to 100% and submit (due Thursday)'], { match: 'dry' }), 't35'],
+      [4, hw('t35', 'org', 'afternoon', 100, ['Homework to 100%', 'Trace assembly code by hand: registers, stack, calls'])],
+      [5, hw('t40', 'prob', 'first', 100, ['Written sheet to 100%, and submit if it’s sheet 2, 5, 7, 9 or 11', 'Update the formula sheet'], { match: 'written' })],
+      [5, hw('hw-fri-ww', 'prob', 'second', 100, ['WeBWorK to 100%, when a sheet is open (due Sunday)'], { optional: true, match: 'webwork' }), null],
+      [6, hw('t42', 'qp', 'first', 40, ['Start the new dry sheet: to 40%', 'Quick review of the week’s lectures'], { match: 'dry' })],
+      [6, hw('hw-sat-qpp', 'qp', 'second', 100, ['Prep assignment to 100%, when one is open (due Sunday)'], { optional: true, match: 'prep' }), null],
+      [6, hw('t41', 'ds', 'last', 100, ['Homework to 100% (not submitted, so drop this first on a short day)', 'From mid-semester: a past exam instead']), null],
+    ],
+  },
 ];
+
+// Insert or replace an item by id. Replacing keeps its ticks, since ticks are stored by id.
+function putItem(p, day, item, before, since) {
+  let found = null;
+  p.days.forEach((d, di) => d.items.forEach((x, xi) => { if (x.id === item.id) found = { di, xi }; }));
+  const next = structuredClone(item);
+  if (found && found.di === day && before === undefined) { p.days[day].items[found.xi] = next; return; }
+  if (found) p.days[found.di].items.splice(found.xi, 1);
+  else if (since && !next.optional) next.since = since; // new targets don't count against earlier weeks
+  const items = p.days[day].items;
+  const at = before ? items.findIndex((x) => x.id === before) : -1;
+  if (at >= 0) items.splice(at, 0, next); else items.push(next);
+}
 
 export function migratePlan(plan) {
   const p = structuredClone(plan);
@@ -148,16 +193,19 @@ export function migratePlan(plan) {
   for (const u of PLAN_UPDATES) {
     if (p.updates.includes(u.id)) continue;
     const all = () => p.days.flatMap((d) => d.items);
-    for (const [day, item, before] of u.add) {
+    for (const [day, item, before] of u.add || []) {
       if (all().some((x) => x.id === item.id)) continue;
       const items = p.days[day].items;
       const at = before ? items.findIndex((x) => x.id === before) : -1;
       if (at >= 0) items.splice(at, 0, structuredClone(item)); else items.push(structuredClone(item));
     }
-    for (const [id, from, to] of u.reword) {
+    for (const [id, from, to] of u.reword || []) {
       const it = all().find((x) => x.id === id);
       if (it && JSON.stringify(it.tasks) === JSON.stringify(from)) it.tasks = [...to];
     }
+    for (const d of p.days) d.items = d.items.filter((x) => !(u.remove || []).includes(x.id));
+    for (const [day, from, to] of u.hours || []) if (from.includes(p.days[day].hours)) p.days[day].hours = to;
+    for (const [day, item, before] of u.put || []) putItem(p, day, item, before, u.since);
     p.updates.push(u.id);
     changed = true;
   }
@@ -186,21 +234,22 @@ export const DEFAULT_SETTINGS = {
 };
 
 // ---------- Plan helpers ----------
-export const required = (items) => items.filter((i) => !i.optional);
+// Required targets. Given a week, targets added later than that week don't count for it.
+export const required = (items, week) => items.filter((i) => !i.optional && (!week || !i.since || i.since <= week));
 
 // Unticked required targets from earlier days of this week.
-export function overdueItems(plan, weekTicks, dow) {
+export function overdueItems(plan, weekTicks, dow, week) {
   const out = [];
   for (let d = 0; d < dow; d++) {
-    for (const item of required(plan.days[d].items)) {
+    for (const item of required(plan.days[d].items, week)) {
       if (!weekTicks?.[item.id]?.done) out.push({ day: d, item });
     }
   }
   return out;
 }
 
-export function remainingToday(plan, weekTicks, dow) {
-  return required(plan.days[dow].items).filter((i) => !weekTicks?.[i.id]?.done);
+export function remainingToday(plan, weekTicks, dow, week) {
+  return required(plan.days[dow].items, week).filter((i) => !weekTicks?.[i.id]?.done);
 }
 
 // ---------- Deadlines ----------
@@ -211,6 +260,44 @@ export function deadlineStatus(dl, today) {
   if (left <= 2) return 'soon';
   return 'ok';
 }
+
+// The deadline a ticked "Homework to N%" target moves. Courses with several kinds of
+// homework tag their targets with `match` (a word in the deadline's name, like "moodle"),
+// and only a deadline due within nine days counts, so a sheet two weeks away isn't touched.
+export function deadlineFor(deadlines, item, today) {
+  const open = deadlines
+    .filter((d) => !d.deleted && d.course === item.course && d.progress < 100 && daysBetween(today, d.due) >= -7)
+    .filter((d) => !item.match || (d.title.toLowerCase().includes(item.match) && daysBetween(today, d.due) <= 9))
+    .sort((a, b) => a.due.localeCompare(b.due));
+  return open[0] || null;
+}
+
+// Due dates published by the courses. Each set is added once; deleting one in the app sticks.
+const dl = (id, course, title, due) => ({ id, course, title, due });
+export const DEADLINE_SEEDS = [
+  {
+    id: 'hw-2026-11',
+    items: [
+      dl('s-qp-m3', 'qp', 'Moodle 3: photoelectric effect', '2026-11-18'),
+      dl('s-qp-m4', 'qp', 'Moodle 4: de Broglie and Bragg', '2026-11-25'),
+      dl('s-qp-m5', 'qp', 'Moodle 5: Bohr model', '2026-12-02'),
+      dl('s-qp-p1', 'qp', 'Prep 1: Dirac notation', '2026-11-29'),
+      dl('s-qp-p2', 'qp', 'Prep 2: infinite well', '2026-12-20'),
+      dl('s-qp-p3', 'qp', 'Prep 3: harmonic oscillator', '2027-01-03'),
+      dl('s-qp-p4', 'qp', 'Prep 4: angular momentum', '2027-01-10'),
+      dl('s-qp-p5', 'qp', 'Prep 5: spin', '2027-01-17'),
+      dl('s-prob-ww1', 'prob', 'WeBWorK 1', '2026-11-22'),
+      dl('s-prob-ww2', 'prob', 'WeBWorK 2', '2026-11-29'),
+      dl('s-prob-ww3', 'prob', 'WeBWorK 3', '2026-12-06'),
+      dl('s-prob-w2', 'prob', 'Written HW 2', '2026-11-30'),
+      dl('s-prob-w5', 'prob', 'Written HW 5', '2026-12-16'),
+      dl('s-prob-w7', 'prob', 'Written HW 7', '2026-12-30'),
+      dl('s-prob-w9', 'prob', 'Written HW 9', '2027-01-14'),
+      dl('s-prob-w11', 'prob', 'Written HW 11', '2027-01-28'),
+      dl('s-org-hw1', 'org', 'HW1 wet: basic assembly', '2026-11-24'),
+    ],
+  },
+];
 
 // ---------- Exams ----------
 export function takingExams(settings) {

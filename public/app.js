@@ -1,10 +1,10 @@
 import {
   COURSES, TRACKED, DAY_NAMES, DEFAULT_PLAN, nowLocal, addDays, daysBetween, weekOf, fmtShortDate,
-  overdueItems, required, deadlineStatus, upcomingExams, inExamMode, examPrep,
+  overdueItems, required, deadlineStatus, deadlineFor, upcomingExams, inExamMode, examPrep,
   activeGoals, goalCount, goalDone, GOAL_SOFT_CAP, GOAL_FLAG_DOW,
 } from './shared.js';
 
-const VERSION = '1.3.0';
+const VERSION = '1.4.0';
 
 // ---------- Storage ----------
 const LS = {
@@ -152,16 +152,12 @@ function commitSettings(mutator) {
   commit({ type: 'settings', settings });
 }
 
-// Ticking "Homework to 60%" moves the nearest open deadline of that course up to 60%.
-function bumpDeadline(course, hw) {
-  const { today } = clock();
-  const open = Object.values(store.state.deadlines)
-    .filter((d) => !d.deleted && d.course === course && d.progress < 100 && daysBetween(today, d.due) >= -7)
-    .sort((a, b) => a.due.localeCompare(b.due));
-  const d = open[0];
-  if (d && d.progress < hw) {
-    commit({ type: 'deadline', ...d, progress: hw });
-    toast(`${d.title} is now at ${hw}%`);
+// Ticking "Homework to 60%" moves the nearest open deadline for that homework up to 60%.
+function bumpDeadline(item) {
+  const d = deadlineFor(Object.values(store.state.deadlines), item, clock().today);
+  if (d && d.progress < item.hw) {
+    commit({ type: 'deadline', ...d, progress: item.hw });
+    toast(`${d.title} is now at ${item.hw}%`);
   }
 }
 
@@ -223,7 +219,7 @@ function alertsHTML() {
       <div class="row"><a class="btn" href="#deadlines">Update progress</a></div></section>`;
   }
 
-  const behind = overdueItems(s.plan, s.ticks[week], dow);
+  const behind = overdueItems(s.plan, s.ticks[week], dow, week);
   if (behind.length) {
     h += `<section class="card alert"><div class="card-head"><h2>${ICON_WARN}Behind this week</h2><span class="small muted">${plural(behind.length, 'target')}</span></div>
       <ul class="items">${behind.map(({ day, item }) => itemHTML(item, week, { when: DAY_NAMES[day], late: false, effort: false })).join('')}</ul>
@@ -234,7 +230,7 @@ function alertsHTML() {
     const prev = addDays(week, -7);
     const pt = s.ticks[prev];
     if (pt && Object.keys(pt).length && !pt.__dismissed?.done) {
-      const left = overdueItems(s.plan, pt, 7);
+      const left = overdueItems(s.plan, pt, 7, prev);
       if (left.length) {
         h += `<section class="card alert"><div class="card-head"><h2>${ICON_WARN}Left from last week</h2><span class="small muted">${plural(left.length, 'target')}</span></div>
           <ul class="items">${left.map(({ day, item }) => itemHTML(item, prev, { when: DAY_NAMES[day], effort: false })).join('')}</ul>
@@ -250,7 +246,7 @@ function tabsHTML() {
   const { dow, week } = clock();
   const wt = s.ticks[week] || {};
   return `<div class="tabs" role="tablist" aria-label="Days">${s.plan.days.map((d, i) => {
-    const req = required(d.items);
+    const req = required(d.items, week);
     const done = req.filter((x) => wt[x.id]?.done).length;
     const missed = i < dow ? req.length - done : 0;
     return `<button type="button" role="tab" id="tab-${i}" class="tab${i === dow ? ' today' : ''}${req.length && done === req.length ? ' full' : ''}" aria-selected="${i === ui.day}" data-act="day" data-day="${i}">
@@ -274,7 +270,7 @@ function itemFormHTML(item) {
     <label class="field"><span>What to do, one per line</span><textarea id="f-tasks" placeholder="Homework to 50%">${esc(item.tasks.join('\n'))}</textarea></label>
     <div class="row">
       <label class="field" style="max-width:150px"><span>Homework % reached</span><input type="number" id="f-hw" min="0" max="100" step="5" value="${item.hw ?? ''}" placeholder="none"></label>
-      <label class="toggle"><input type="checkbox" id="f-opt"${item.optional ? ' checked' : ''}> Optional (6:30 start)</label>
+      <label class="toggle"><input type="checkbox" id="f-opt"${item.optional ? ' checked' : ''}> Optional (no warning if skipped)</label>
     </div>
     <p class="msg err" id="f-err" hidden></p>
     <div class="row end"><button type="button" class="btn ghost" data-act="cancel-edit">Cancel</button><button type="button" class="btn primary" data-act="save-item">${isNew ? 'Add target' : 'Save'}</button></div>
@@ -287,7 +283,7 @@ function dayCardHTML() {
   const i = ui.day;
   const d = s.plan.days[i];
   const wt = s.ticks[week] || {};
-  const req = required(d.items);
+  const req = required(d.items, week);
   const done = req.filter((x) => wt[x.id]?.done).length;
 
   if (ui.editing) {
@@ -480,13 +476,13 @@ function viewDeadlines() {
         <label class="field"><span>Course</span><select id="d-course">${courseOptions('sig', false)}</select></label>
         <label class="field"><span>Due</span><input type="date" id="d-due" min="${today}"></label>
       </div>
-      <label class="field"><span>Name</span><input type="text" id="d-title" placeholder="Signals HW 3"></label>
+      <label class="field"><span>Name</span><input type="text" id="d-title" placeholder="Quantum dry 3"></label>
       <p class="msg err" id="d-err" hidden></p>
       <div class="row end"><button type="button" class="btn primary" data-act="add-deadline">Add deadline</button></div>
     </section>
     <section class="card"><div class="card-head"><h2>Open</h2><span class="small muted">${open.length}</span></div>
       ${open.length ? `<ul class="list">${open.map(row).join('')}</ul>` : '<p class="muted small">No open deadlines. Add each assignment when it’s published.</p>'}
-      <p class="small muted">Ticking a target like “Homework to 60%” raises the nearest deadline for that course to 60%.</p>
+      <p class="small muted">Ticking a target like “Homework to 60%” raises the nearest deadline for that course to 60%. Quantum and Probability have several kinds of homework, so put the kind in the name: dry, Moodle, prep, written or WeBWorK.</p>
     </section>
     ${done.length ? `<section class="card"><h2>Finished</h2><ul class="list">${done.map((d) => `<li><div class="grow"><div class="meta">${sw(d.course)}<span class="c">${esc(d.title)}</span></div><div class="dl-due">${esc(fmtShortDate(d.due))}</div></div><button type="button" class="btn ghost" data-act="progress" data-id="${esc(d.id)}" data-v="75">Reopen</button></li>`).join('')}</ul></section>` : ''}`;
 }
@@ -496,9 +492,11 @@ function viewStats() {
   const { week } = clock();
   const weeks = Array.from({ length: 8 }, (_, k) => addDays(week, -7 * (7 - k)));
   const reqBy = {};
-  s.plan.days.forEach((d) => required(d.items).forEach((it) => { (reqBy[it.course] ||= []).push(it.id); }));
+  s.plan.days.forEach((d) => required(d.items, week).forEach((it) => { (reqBy[it.course] ||= []).push(it.id); }));
+  // Targets added in a later week don't count against the weeks before them.
+  const since = Object.fromEntries(s.plan.days.flatMap((d) => d.items).map((it) => [it.id, it.since || '']));
   const pct = (c, w) => {
-    const ids = reqBy[c] || []; if (!ids.length) return null;
+    const ids = (reqBy[c] || []).filter((id) => since[id] <= w); if (!ids.length) return null;
     const t = s.ticks[w] || {};
     return Math.round(100 * ids.filter((id) => t[id]?.done).length / ids.length);
   };
@@ -969,7 +967,7 @@ document.addEventListener('change', (e) => {
     commit({ type: 'tick', week, item, done: el.checked, effort: el.checked ? (cur?.effort ?? null) : null });
     if (el.checked && week !== 'exam') {
       const it = s.plan.days.flatMap((d) => d.items).find((x) => x.id === item);
-      if (it?.hw != null) bumpDeadline(it.course, it.hw);
+      if (it?.hw != null) bumpDeadline(it);
     }
   } else if (act === 'goal-check') {
     const { week } = clock(); const n = el.checked ? 1 : 0;
