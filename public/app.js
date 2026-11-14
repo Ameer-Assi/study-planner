@@ -1,10 +1,10 @@
 import {
   COURSES, TRACKED, DAY_NAMES, DEFAULT_PLAN, nowLocal, addDays, daysBetween, weekOf, fmtShortDate,
-  overdueItems, required, deadlineStatus, deadlineFor, upcomingExams, inExamMode, examPrep,
+  overdueItems, required, deadlineStatus, deadlineFor, targetOpen, dueOn, homeworkLadders, upcomingExams, inExamMode, examPrep,
   activeGoals, goalCount, goalDone, GOAL_SOFT_CAP, GOAL_FLAG_DOW,
 } from './shared.js';
 
-const VERSION = '1.4.0';
+const VERSION = '1.5.0';
 
 // ---------- Storage ----------
 const LS = {
@@ -191,13 +191,19 @@ function effortHTML(week, item, effort) {
     `<button type="button" class="seg" data-act="effort" data-week="${esc(week)}" data-item="${esc(item)}" data-v="${v}" aria-pressed="${effort === v}">${l}</button>`).join('')}</div>`;
 }
 
+function dueTagHTML(item, date) {
+  if (!date || !dueOn(Object.values(store.state.deadlines), item, date)) return '';
+  const { today } = clock();
+  return `<span class="tag due">${date === today ? 'due today' : `due ${DAY_NAMES[new Date(date + 'T12:00:00Z').getUTCDay()].slice(0, 3)}`}</span>`;
+}
+
 function itemHTML(item, week, opts = {}) {
   const t = store.state.ticks[week]?.[item.id];
   const done = !!t?.done;
   return `<li class="item${item.optional ? ' optional' : ''}${done ? ' done' : ''}">
     <input type="checkbox" class="check" id="chk-${esc(week)}-${esc(item.id)}" data-act="tick" data-week="${esc(week)}" data-item="${esc(item.id)}"${done ? ' checked' : ''} aria-label="${esc(cname(item.course))}: ${esc(item.tasks[0] || '')}">
     <div class="item-body">
-      <div class="meta">${sw(item.course)}<span class="c">${esc(cname(item.course))}</span><span class="when">${esc(opts.when ?? item.when)}</span>${item.optional ? '<span class="tag">optional</span>' : ''}${opts.late ? '<span class="tag late">late</span>' : ''}</div>
+      <div class="meta">${sw(item.course)}<span class="c">${esc(cname(item.course))}</span><span class="when">${esc(opts.when ?? item.when)}</span>${item.optional ? '<span class="tag">optional</span>' : ''}${opts.late ? '<span class="tag late">late</span>' : ''}${done ? '' : dueTagHTML(item, opts.date)}</div>
       <ul class="tasks">${item.tasks.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>
       ${done && !item.optional && item.course !== 'flex' && opts.effort !== false ? effortHTML(week, item.id, t.effort ?? null) : ''}
     </div>
@@ -285,6 +291,10 @@ function dayCardHTML() {
   const wt = s.ticks[week] || {};
   const req = required(d.items, week);
   const done = req.filter((x) => wt[x.id]?.done).length;
+  const date = addDays(week, i);
+  const dls = Object.values(s.deadlines);
+  const shown = d.items.filter((it) => wt[it.id]?.done || targetOpen(dls, it, date));
+  const hidden = d.items.filter((it) => !shown.includes(it));
 
   if (ui.editing) {
     return `<section class="card" role="tabpanel" aria-labelledby="tab-${i}">
@@ -324,8 +334,59 @@ function dayCardHTML() {
       <div class="row"><span class="mono small muted">${done}/${req.length}</span><button type="button" class="btn ghost" data-act="start-edit">Edit</button></div></div>
     ${d.classes.length ? `<p class="label">Classes</p><ul class="classes">${d.classes.map((c) => `<li><span class="t">${esc(c.time)}</span>${sw(c.course)}<span>${esc(c.label)}</span></li>`).join('')}</ul>` : ''}
     <p class="label">Targets</p>
-    ${d.items.length ? `<ul class="items">${d.items.map((it) => itemHTML(it, week)).join('')}</ul>` : '<p class="muted small">Nothing planned. Tap Edit to add a target.</p>'}
+    ${d.items.length ? `<ul class="items">${shown.map((it) => itemHTML(it, week, { date })).join('')}</ul>` : '<p class="muted small">Nothing planned. Tap Edit to add a target.</p>'}
+    ${hidden.length ? `<p class="small muted">${plural(hidden.length, 'optional target')} hidden: no ${esc(hidden.map(hwName).join(', '))} deadline this week. Add one in Deadlines and ${hidden.length === 1 ? 'it shows' : 'they show'} up here.</p>` : ''}
   </section>`;
+}
+
+const hwName = (it) => `${COURSES[it.course]?.name || it.course} ${it.match === 'webwork' ? 'WeBWorK' : it.match === 'moodle' ? 'Moodle' : it.match}`;
+
+// Homework ladders for the week: one row per homework, one cell per day with a target.
+function homeworkCardHTML() {
+  const s = store.state;
+  const { today, dow, week } = clock();
+  const dls = Object.values(s.deadlines);
+  const wt = s.ticks[week] || {};
+  const rows = homeworkLadders(s.plan).map((r) => {
+    let behind = false, any = false;
+    const cells = r.days.map((items, day) => {
+      const live = items.filter((it) => wt[it.id]?.done || targetOpen(dls, it, addDays(week, day)));
+      if (!live.length) return '<span></span>';
+      any = true;
+      const done = live.every((it) => wt[it.id]?.done);
+      const counts = required(live, week).length > 0;
+      const missed = !done && day < dow && counts;
+      if (missed) behind = true;
+      const pct = Math.max(...live.map((it) => it.hw));
+      const cls = done ? 'done' : missed ? 'missed' : day === dow ? 'today' : counts ? '' : 'opt';
+      const state = done ? 'done' : missed ? 'not done' : day === dow ? 'today' : 'coming up';
+      return `<button type="button" class="cell ${cls}" style="--c:var(--${esc(r.course)})" data-act="day" data-day="${day}" aria-label="${esc(cname(r.course))} ${esc(r.kind)} to ${pct}% on ${DAY_NAMES[day]}, ${state}">${pct}</button>`;
+    });
+    const first = r.days.flat()[0];
+    const d = deadlineFor(dls, first, today);
+    return { r, cells, behind, any, d };
+  }).filter((x) => x.any);
+  if (!rows.length) return '';
+  const open = LS.get('sp-hw-open', true);
+  const behind = rows.filter((x) => x.behind).length;
+  const head = `<div class="card-head"><h2>Homework this week</h2>
+    <div class="row"><span class="small ${behind ? '' : 'muted'}"${behind ? ' style="color:var(--warn)"' : ''}>${behind ? `${behind} behind` : 'on track'}</span>
+    <button type="button" class="btn ghost" data-act="toggle-hw" aria-expanded="${open}">${open ? 'Hide' : 'Show'}</button></div></div>`;
+  if (!open) return `<section class="card">${head}</section>`;
+  return `<section class="card">${head}
+    <div class="hw">
+      <span></span>${DAY_NAMES.map((n, i) => `<span class="hd${i === dow ? ' today' : ''}">${n.slice(0, 2)}</span>`).join('')}
+      ${rows.map(({ r, cells, d }) => `<div class="nm"><b>${sw(r.course)}<span>${esc(COURSES[r.course].short)}${r.kind ? ' ' + esc(r.kind) : ''}</span></b>
+        ${d ? `<span class="dl-due ${deadlineStatus(d, today)}">${esc(dueShort(d.due, today))}</span>` : ''}</div>
+        ${cells.join('')}`).join('')}
+    </div>
+    <p class="small muted">Each number is the percent to reach that day. Filled is done, orange is behind. Tap one to open its day.</p>
+  </section>`;
+}
+
+function dueShort(due, today) {
+  const n = daysBetween(today, due);
+  return n < 0 ? `${plural(-n, 'day')} late` : n === 0 ? 'due today' : n === 1 ? 'due tomorrow' : `due ${fmtShortDate(due)}`;
 }
 
 function examCardHTML() {
@@ -446,7 +507,7 @@ function viewWeek() {
     h += examCardHTML();
     if (!ui.showWeek) return h;
   }
-  h += alertsHTML() + goalLeftoversHTML() + goalsCardHTML() + tabsHTML() + dayCardHTML();
+  h += alertsHTML() + goalLeftoversHTML() + goalsCardHTML() + homeworkCardHTML() + tabsHTML() + dayCardHTML();
   return h;
 }
 
@@ -779,6 +840,7 @@ document.addEventListener('click', async (e) => {
     case 'confirm': ui.confirm = el.dataset.key; render(); break;
     case 'cancel-confirm': ui.confirm = null; render(); break;
     case 'toggle-week': ui.showWeek = !ui.showWeek; render(); break;
+    case 'toggle-hw': LS.set('sp-hw-open', !LS.get('sp-hw-open', true)); render(); break;
 
     case 'effort': {
       const { week, item } = el.dataset; const v = +el.dataset.v;

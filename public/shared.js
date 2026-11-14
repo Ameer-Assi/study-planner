@@ -265,11 +265,44 @@ export function deadlineStatus(dl, today) {
 // homework tag their targets with `match` (a word in the deadline's name, like "moodle"),
 // and only a deadline due within nine days counts, so a sheet two weeks away isn't touched.
 export function deadlineFor(deadlines, item, today) {
-  const open = deadlines
-    .filter((d) => !d.deleted && d.course === item.course && d.progress < 100 && daysBetween(today, d.due) >= -7)
-    .filter((d) => !item.match || (d.title.toLowerCase().includes(item.match) && daysBetween(today, d.due) <= 9))
+  const open = deadlinesOf(deadlines, item)
+    .filter((d) => d.progress < 100 && daysBetween(today, d.due) >= -7 && (!item.match || daysBetween(today, d.due) <= 9))
     .sort((a, b) => a.due.localeCompare(b.due));
   return open[0] || null;
+}
+
+// Deadlines that belong to a target: same course, and the same kind when the target names one.
+export function deadlinesOf(deadlines, item) {
+  return deadlines.filter((d) => !d.deleted && d.course === item.course && (!item.match || d.title.toLowerCase().includes(item.match)));
+}
+
+// Optional targets tied to a kind of homework (Moodle, prep, WeBWorK) only apply
+// when a deadline of that kind falls within a week after the target's day.
+export function targetOpen(deadlines, item, date) {
+  if (!item.optional || !item.match) return true;
+  return deadlinesOf(deadlines, item).some((d) => { const n = daysBetween(date, d.due); return n >= 0 && n <= 7; });
+}
+
+// The unfinished deadline that falls on a homework target's own day, if there is one.
+export function dueOn(deadlines, item, date) {
+  if (item.hw == null) return null;
+  return deadlinesOf(deadlines, item).find((d) => d.due === date && d.progress < 100) || null;
+}
+
+// ---------- Homework ladders ----------
+// One row per homework (course + kind), with its "Homework to N%" targets by day.
+const KINDS = { dry: 'dry', moodle: 'Moodle', prep: 'prep', written: 'written', webwork: 'WeBWorK' };
+export function homeworkLadders(plan) {
+  const rows = new Map();
+  plan.days.forEach((d, day) => d.items.forEach((item) => {
+    if (item.hw == null || !COURSES[item.course]?.track) return;
+    const key = `${item.course}:${item.match || ''}`;
+    if (!rows.has(key)) rows.set(key, { key, course: item.course, kind: item.match ? KINDS[item.match] || item.match : '', days: [[], [], [], [], [], [], []] });
+    rows.get(key).days[day].push(item);
+  }));
+  const optional = (r) => r.days.flat().every((i) => i.optional);
+  return [...rows.values()].sort((a, b) =>
+    TRACKED.indexOf(a.course) - TRACKED.indexOf(b.course) || optional(a) - optional(b) || a.days.findIndex((x) => x.length) - b.days.findIndex((x) => x.length));
 }
 
 // Due dates published by the courses. Each set is added once; deleting one in the app sticks.
