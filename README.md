@@ -1,6 +1,12 @@
 # Study planner
 
-A phone app for the Winter 2026–27 weekly study plan: daily targets with overdue warnings, real deadlines, an exam countdown with exam-prep mode, effort tagging, weekly stats, and morning/evening reminders. Works offline and syncs between devices.
+A phone app for planning the study week around goals. On Saturday you list what you want done next week, then put each goal on the days you'll work on it. A goal can sit on several days, which splits it into parts, and each part can carry a note such as "questions 1–3".
+
+- **Plan:** hold a goal and drag it to a day, or tap it and pick the days. Goals marked "Every week" come back each week, ready to place.
+- **Today:** the parts placed on today, with a tick box each. Unticked parts from earlier days show as behind, and goals with no day are flagged.
+- **Reminders:** a morning summary and an evening nudge. On Saturday they also say if next week isn't planned.
+
+Works offline and syncs between devices.
 
 Runs free on Cloudflare: a Worker serves the app and the API, D1 stores your data, and a cron trigger sends reminders over Web Push.
 
@@ -17,10 +23,13 @@ The database tables are created automatically on the first request.
 
 ## Files
 
-- `public/` — the app (plain HTML, CSS and JS; no build step). `shared.js` holds the default plan, dates and exam logic, and is also used by the server.
+- `public/` — the app (plain HTML, CSS and JS; no build step). `shared.js` holds the plan format, the goal logic and the dates, and is also used by the server.
 - `src/worker.js` — API (`/api/state`, `/api/sync`, push subscribe), and the scheduled reminder job.
 - `src/push.js` — Web Push (VAPID + aes128gcm) with WebCrypto only.
 - `wrangler.jsonc` — Worker config: D1 binding, static assets, cron every 15 minutes.
+- `scripts/preview.mjs` — builds a single-file preview that runs without a server: `node scripts/preview.mjs preview.html`.
+
+Plans saved by the first version (fixed targets on each day) are converted to goals the first time the server loads them. The old plan is kept in the database under the key `plan-v1`.
 
 ## Local development
 

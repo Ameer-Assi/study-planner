@@ -1,8 +1,8 @@
 // Study planner server: sync API on D1, plus scheduled reminders over Web Push.
 import { sendPush } from './push.js';
 import {
-  DEFAULT_PLAN, DEFAULT_SETTINGS, DEADLINE_SEEDS, COURSES, migratePlan, openGoals, GOAL_FLAG_DOW, DAY_NAMES, nowLocal, weekOf, daysBetween,
-  overdueItems, remainingToday, required, deadlineStatus, inExamMode, examPrep,
+  DEFAULT_PLAN, DEFAULT_SETTINGS, DAY_NAMES, migratePlan, ensureWeek, nowLocal, weekOf, addDays, dowOf,
+  dayParts, lateParts, openToday, unplacedGoals, planningLeft, partLabel,
 } from '../public/shared.js';
 
 const SCHEMA = [
@@ -43,43 +43,26 @@ function putKV(db, key, value, updated) {
 
 async function loadCore(db) {
   const [plan, settings] = await Promise.all([getKV(db, 'plan', DEFAULT_PLAN), getKV(db, 'settings', DEFAULT_SETTINGS)]);
-  // Saved plans pick up new plan updates once, keeping the user's own edits.
+  // A plan saved by the old app is converted to goals once. The old one is kept as a backup.
   if (plan.updated) {
     const m = migratePlan(plan.value);
     if (m.changed) {
       const now = Date.now();
-      await putKV(db, 'plan', m.plan, now).run();
+      await db.batch([
+        db.prepare('INSERT OR IGNORE INTO kv (key, value, updated) VALUES (?1, ?2, ?3)').bind('plan-v1', JSON.stringify(plan.value), now),
+        putKV(db, 'plan', m.plan, now),
+      ]);
       plan.value = m.plan; plan.updated = now;
     }
   }
   return { plan, settings };
 }
 
-// Published due dates are added to the deadline list once per set.
-async function seedDeadlines(db) {
-  const today = nowLocal().date;
-  for (const set of DEADLINE_SEEDS) {
-    const key = `seed:${set.id}`;
-    if (await db.prepare('SELECT 1 FROM kv WHERE key = ?').bind(key).first()) continue;
-    const now = Date.now();
-    await db.batch([
-      ...(set.items || []).filter((d) => d.due >= today).map((d) => db.prepare(
-        'INSERT OR IGNORE INTO deadlines (id, course, title, due, progress, deleted, updated) VALUES (?1, ?2, ?3, ?4, 0, 0, ?5)',
-      ).bind(d.id, d.course, d.title, d.due, now)),
-      ...(set.progress || []).map(([id, p]) => db.prepare(
-        'UPDATE deadlines SET progress = ?2, updated = ?3 WHERE id = ?1 AND progress < ?2',
-      ).bind(id, p, now)),
-      putKV(db, key, true, now),
-    ]);
-  }
-}
-
 async function handleState(env, url) {
   const db = env.DB;
   const { plan, settings } = await loadCore(db);
-  await seedDeadlines(db);
   const weeks = Math.min(30, Math.max(1, +(url.searchParams.get('weeks') || 12)));
-  const since = weekOf(addDaysSafe(nowLocal().date, -7 * (weeks - 1)));
+  const since = weekOf(addDays(nowLocal().date, -7 * (weeks - 1)));
   const [ticks, deadlines] = await Promise.all([
     db.prepare("SELECT week, item, done, effort, updated FROM ticks WHERE week >= ? OR week NOT LIKE '____-__-__'").bind(since).all(),
     db.prepare('SELECT id, course, title, due, progress, deleted, updated FROM deadlines').all(),
@@ -91,11 +74,6 @@ async function handleState(env, url) {
     vapidPublic: env.VAPID_PUBLIC || null,
   });
 }
-function addDaysSafe(date, n) {
-  const [y, m, d] = date.split('-').map(Number);
-  return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
-}
-
 const isStr = (v, max = 2000) => typeof v === 'string' && v.length <= max;
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 
@@ -108,7 +86,7 @@ async function handleSync(request, env) {
     if (!op || !isNum(op.updated)) continue;
     if (op.type === 'tick' && isStr(op.week, 40) && isStr(op.item, 80)) {
       const effort = op.effort === -1 || op.effort === 0 || op.effort === 1 ? op.effort : null;
-      // Weekly goals send a count; everything else is done / not done.
+      // The old app sent a count for weekly goals; any count above zero means done.
       const done = isNum(op.count) ? Math.max(0, Math.min(999, Math.round(op.count))) : op.done ? 1 : 0;
       stmts.push(db.prepare(
         'INSERT INTO ticks (week, item, done, effort, updated) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(week, item) DO UPDATE SET done = excluded.done, effort = excluded.effort, updated = excluded.updated WHERE excluded.updated >= ticks.updated',
@@ -161,46 +139,48 @@ async function pushAll(env, message) {
 }
 
 // ---------- Reminders ----------
-const names = (items) => [...new Set(items.map((i) => COURSES[i.course]?.name || i.course))].join(', ');
+const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+function listed(items, max = 4) {
+  const names = items.map(partLabel);
+  return names.length > max ? `${names.slice(0, max).join(', ')} and ${names.length - max} more` : names.join(', ');
+}
 
 export async function buildReminder(env, when, slot) {
   const db = env.DB;
-  const { plan: { value: plan }, settings: { value: settings } } = await loadCore(db);
+  const { plan: { value: saved } } = await loadCore(db);
   const today = when.date;
   const dow = when.dow;
   const week = weekOf(today);
+  const next = addDays(week, 7);
+  // Repeating goals are filled in here without saving, exactly as the phone does.
+  const plan = structuredClone(saved);
+  ensureWeek(plan, week); ensureWeek(plan, next);
   const { results } = await db.prepare('SELECT item, done FROM ticks WHERE week = ?').bind(week).all();
   const wt = Object.fromEntries(results.map((r) => [r.item, { done: r.done }]));
-  const dls = (await db.prepare('SELECT course, title, due, progress FROM deadlines WHERE deleted = 0').all()).results;
-  const urgent = dls.filter((d) => ['soon', 'late'].includes(deadlineStatus(d, today)));
 
-  if (inExamMode(settings, today)) {
-    if (slot !== 'morning') return null;
-    const p = examPrep(settings, today);
-    const course = COURSES[p.exam.course]?.name || p.exam.course;
-    const title = p.daysLeft === 0 ? `${course} exam today` : `${course} exam in ${p.daysLeft} day${p.daysLeft === 1 ? '' : 's'}`;
-    return { title, body: `${p.phase}: ${p.tasks[0]}`, tag: 'morning' };
-  }
+  // Saturday is planning day: say so while next week still has goals without a day.
+  const left = planningLeft(plan, null, next);
+  const planNext = dow === 6 && (left.unplaced > 0 || left.goals === 0)
+    ? (left.goals ? `Plan next week: ${plural(left.unplaced, 'goal')} to place` : 'Plan next week: no goals yet')
+    : null;
 
   if (slot === 'morning') {
-    const todays = required(plan.days[dow].items, week);
-    const behind = overdueItems(plan, wt, dow, week);
-    const goals = dow >= GOAL_FLAG_DOW ? openGoals(plan, wt, week) : [];
+    const todays = dayParts(plan, week, dow);
+    const behind = lateParts(plan, wt, week, dow);
+    const loose = unplacedGoals(plan, wt, week);
     const lines = [];
-    if (todays.length) lines.push(names(todays));
+    if (todays.length) lines.push(listed(todays));
     if (behind.length) lines.push(`${behind.length} behind from earlier this week`);
-    if (goals.length) lines.push(`${goals.length} weekly goal${goals.length === 1 ? '' : 's'} open`);
-    for (const d of urgent.slice(0, 2)) {
-      const left = daysBetween(today, d.due);
-      lines.push(`${d.title}: ${left < 0 ? 'overdue' : left === 0 ? 'due today' : left === 1 ? 'due tomorrow' : `due in ${left} days`}, at ${d.progress}%`);
-    }
-    if (!todays.length && !behind.length && !urgent.length && !goals.length) return null;
-    return { title: `${DAY_NAMES[dow]}: ${todays.length} target${todays.length === 1 ? '' : 's'}`, body: lines.join(' · '), tag: 'morning' };
+    if (loose.length) lines.push(`${plural(loose.length, 'goal')} not on any day`);
+    if (planNext) lines.push(planNext);
+    if (!lines.length) return null;
+    return { title: `${DAY_NAMES[dow]}: ${todays.length ? `${todays.length} to do` : 'nothing placed'}`, body: lines.join(' · '), tag: 'morning' };
   }
 
-  const left = remainingToday(plan, wt, dow, week);
-  if (!left.length) return null;
-  return { title: `${left.length} target${left.length === 1 ? '' : 's'} left today`, body: names(left), tag: 'evening' };
+  const open = openToday(plan, wt, week, dow);
+  if (!open.length && !planNext) return null;
+  if (!open.length) return { title: 'Plan next week', body: planNext.replace('Plan next week: ', ''), tag: 'evening' };
+  return { title: `${open.length} left today`, body: [listed(open), planNext].filter(Boolean).join(' · '), tag: 'evening' };
 }
 
 async function runSchedule(env, scheduledTime) {
@@ -243,7 +223,9 @@ export default {
         return json(result);
       }
       if (url.pathname === '/api/preview-reminder' && request.method === 'GET') {
-        const when = nowLocal();
+        // ?date=2026-11-21 previews the reminder for another day.
+        const date = url.searchParams.get('date');
+        const when = /^\d{4}-\d{2}-\d{2}$/.test(date || '') ? { ...nowLocal(), date, dow: dowOf(date) } : nowLocal();
         const slot = url.searchParams.get('slot') === 'evening' ? 'evening' : 'morning';
         return json({ when, message: await buildReminder(env, when, slot) });
       }

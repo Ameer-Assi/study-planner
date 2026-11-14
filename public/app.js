@@ -1,10 +1,13 @@
 import {
-  COURSES, TRACKED, DAY_NAMES, DEFAULT_PLAN, nowLocal, addDays, daysBetween, weekOf, fmtShortDate,
-  overdueItems, required, deadlineStatus, deadlineFor, targetOpen, dueOn, homeworkLadders, upcomingExams, inExamMode, examPrep,
-  activeGoals, goalCount, goalDone, GOAL_SOFT_CAP, GOAL_FLAG_DOW,
+  COURSES, TRACKED, DAY_NAMES, DEFAULT_PLAN, DEFAULT_SETTINGS, nowLocal, addDays, weekOf, fmtShortDate, guessCourse,
+  migratePlan, ensureWeek, pruneGoals, weekGoals, repeatOf, sortedParts, goalDone, partDone, dayParts, lateParts,
+  unplacedGoals, planningLeft, usualDays,
 } from './shared.js';
 
-const VERSION = '1.5.1';
+const VERSION = '2.0.0';
+// Preview mode: runs without a server and keeps everything on this device.
+const DEMO = !!globalThis.PLANNER_DEMO;
+const PRE = DEMO ? 'spd-' : 'sp-';
 
 // ---------- Storage ----------
 const LS = {
@@ -13,27 +16,32 @@ const LS = {
   del(k) { try { localStorage.removeItem(k); } catch {} },
 };
 const store = {
-  key: LS.get('sp-key', null),
-  state: LS.get('sp-state', null),
-  outbox: LS.get('sp-outbox', []),
+  key: DEMO ? 'preview' : LS.get('sp-key', null),
+  state: LS.get(PRE + 'state', null),
+  outbox: DEMO ? [] : LS.get('sp-outbox', []),
 };
 const ui = {
-  view: 'week', day: null, editing: false, editId: null, confirm: null,
-  sync: 'idle', showWeek: false, pickDays: [], pendingEdit: null, goalEdit: false, goalForm: null, push: null, msgs: {}, pendingRender: false, lastDate: null,
+  view: 'today', which: null, sheet: null, confirm: null,
+  addTitle: '', addCourse: 'auto', addRepeat: false,
+  sync: DEMO ? 'demo' : 'idle', push: null, msgs: {}, pendingRender: false, lastDate: null,
 };
-const save = () => { LS.set('sp-state', store.state); LS.set('sp-outbox', store.outbox); };
+const save = () => { LS.set(PRE + 'state', store.state); if (!DEMO) LS.set('sp-outbox', store.outbox); };
 
 // ---------- Helpers ----------
 const $app = document.getElementById('app');
 const $nav = document.getElementById('nav');
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const cname = (k) => COURSES[k]?.name || k;
-const sw = (k) => (k === 'any' ? '<span class="sw dash"></span>' : `<span class="sw" style="--c:var(--${esc(k)})"></span>`);
+const cname = (k) => COURSES[k]?.name || 'General';
+const sw = (k) => (COURSES[k] ? `<span class="sw" style="--c:var(--${esc(k)})"></span>` : '<span class="sw dash"></span>');
 const uid = () => 'u' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 const clock = () => { const L = nowLocal(); return { today: L.date, dow: L.dow, week: weekOf(L.date), hm: L.hm }; };
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+const short = (d) => DAY_NAMES[d].slice(0, 3);
+const andList = (a) => (a.length < 2 ? a.join('') : `${a.slice(0, -1).join(', ')} and ${a[a.length - 1]}`);
 const ICON_WARN = '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 2.5 20h19L12 3.5Z"/><path d="M12 10v4.5M12 17.5v.01"/></svg>';
-const ICON_CLOCK = '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>';
+const ICON_FLAG = '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 21V4M5 4h11l-2 4 2 4H5"/></svg>';
+const ICON_REPEAT = '<svg class="ico rep" viewBox="0 0 24 24" role="img" aria-label="Repeats every week"><path d="M4 11V9.5A3.5 3.5 0 0 1 7.5 6H19M16 3l3 3-3 3M20 13v1.5a3.5 3.5 0 0 1-3.5 3.5H5M8 21l-3-3 3-3"/></svg>';
+const GRIP = '<span class="grip" aria-hidden="true"><svg viewBox="0 0 12 20"><circle cx="3" cy="4" r="1.5"/><circle cx="9" cy="4" r="1.5"/><circle cx="3" cy="10" r="1.5"/><circle cx="9" cy="10" r="1.5"/><circle cx="3" cy="16" r="1.5"/><circle cx="9" cy="16" r="1.5"/></svg></span>';
 
 function b64u(buf) {
   const u = new Uint8Array(buf); let s = '';
@@ -55,13 +63,10 @@ function toast(text) {
   clearTimeout(toastTimer); toastTimer = setTimeout(() => t.remove(), 2600);
 }
 
-function dueText(due, today) {
-  const n = daysBetween(today, due);
-  if (n < 0) return `${plural(-n, 'day')} late`;
-  if (n === 0) return 'due today';
-  if (n === 1) return 'due tomorrow';
-  return `due ${DAY_NAMES[new Date(due + 'T12:00:00Z').getUTCDay()].slice(0, 3)} ${fmtShortDate(due)} · in ${n} days`;
-}
+// The week the Plan screen shows. On Saturday it opens on next week, since that's planning day.
+const planWhich = () => ui.which || (clock().dow === 6 ? 'next' : 'this');
+const planWeek = () => (planWhich() === 'next' ? addDays(clock().week, 7) : clock().week);
+const weekRange = (w) => `${fmtShortDate(w)} – ${fmtShortDate(addDays(w, 6))}`;
 
 // ---------- Server ----------
 async function api(path, { method = 'GET', body } = {}) {
@@ -77,26 +82,31 @@ async function api(path, { method = 'GET', body } = {}) {
 
 function fromServer(d) {
   const ticks = {};
-  for (const t of d.ticks) (ticks[t.week] ||= {})[t.item] = { done: t.done, effort: t.effort, updated: t.updated };
-  const deadlines = {};
-  for (const x of d.deadlines) deadlines[x.id] = { ...x, deleted: !!x.deleted };
-  return {
-    plan: d.plan, planUpdated: d.planUpdated, settings: d.settings, settingsUpdated: d.settingsUpdated,
-    ticks, deadlines, vapidPublic: d.vapidPublic,
-  };
+  for (const t of d.ticks) (ticks[t.week] ||= {})[t.item] = { done: t.done, updated: t.updated };
+  return { plan: d.plan, planUpdated: d.planUpdated, settings: d.settings, settingsUpdated: d.settingsUpdated, ticks, vapidPublic: d.vapidPublic };
+}
+
+// Brings a state up to date: converts an old plan, and fills in this week's and
+// next week's repeating goals. Nothing is sent to the server for this.
+function prepare(s) {
+  s.plan = migratePlan(s.plan).plan;
+  s.ticks ||= {};
+  const { week } = clock();
+  ensureWeek(s.plan, week); ensureWeek(s.plan, addDays(week, 7));
+  return s;
 }
 
 function applyOp(s, op) {
-  if (op.type === 'tick') (s.ticks[op.week] ||= {})[op.item] = { done: op.done, effort: op.effort, updated: op.updated };
-  else if (op.type === 'deadline') s.deadlines[op.id] = { id: op.id, course: op.course, title: op.title, due: op.due, progress: op.progress, deleted: !!op.deleted, updated: op.updated };
+  if (op.type === 'tick') (s.ticks[op.week] ||= {})[op.item] = { done: op.done, updated: op.updated };
   else if (op.type === 'plan') { s.plan = op.plan; s.planUpdated = op.updated; }
   else if (op.type === 'settings') { s.settings = op.settings; s.settingsUpdated = op.updated; }
 }
 
-function setSync(state) { ui.sync = state; const el = document.querySelector('.sync'); if (el) el.outerHTML = syncHTML(); }
+function setSync(state) { ui.sync = DEMO ? 'demo' : state; const el = document.querySelector('.sync'); if (el) el.outerHTML = syncHTML(); }
 
 let flushing = false;
 async function flush() {
+  if (DEMO) { store.outbox = []; return; }
   if (flushing || !store.key || !store.outbox.length) return;
   if (!navigator.onLine) { setSync('offline'); return; }
   flushing = true;
@@ -115,14 +125,18 @@ async function flush() {
 
 async function pull() {
   if (!store.key) return;
+  if (DEMO) {
+    store.state = prepare(store.state || { plan: structuredClone(DEFAULT_PLAN), settings: structuredClone(DEFAULT_SETTINGS), ticks: {}, vapidPublic: null });
+    save(); render(); return;
+  }
   if (!navigator.onLine) { setSync('offline'); render(); return; }
   if (!store.state) setSync('loading');
   try {
     await flush();
-    const d = await api('/api/state?weeks=12');
+    const d = await api('/api/state?weeks=8');
     const s = fromServer(d);
     for (const op of store.outbox) applyOp(s, op);
-    store.state = s; save();
+    store.state = prepare(s); save();
     setSync(store.outbox.length ? 'pending' : 'ok');
   } catch (e) {
     setSync(e.status === 401 ? 'auth' : navigator.onLine ? 'error' : 'offline');
@@ -131,10 +145,13 @@ async function pull() {
   render();
 }
 
-function commit(op) {
-  op.updated = Date.now();
-  applyOp(store.state, op);
-  store.outbox.push(op);
+function commit(...ops) {
+  const now = Date.now();
+  for (const op of ops) {
+    op.updated = now;
+    applyOp(store.state, op);
+    if (!DEMO) store.outbox.push(op);
+  }
   save();
   if (ui.sync === 'ok') ui.sync = 'pending';
   render();
@@ -144,6 +161,9 @@ function commit(op) {
 function commitPlan(mutator) {
   const plan = structuredClone(store.state.plan);
   mutator(plan);
+  const { week } = clock();
+  ensureWeek(plan, week); ensureWeek(plan, addDays(week, 7));
+  pruneGoals(plan, week);
   commit({ type: 'plan', plan });
 }
 function commitSettings(mutator) {
@@ -151,23 +171,67 @@ function commitSettings(mutator) {
   mutator(settings);
   commit({ type: 'settings', settings });
 }
+const tickOp = (week, item, done) => ({ type: 'tick', week, item, done, effort: null });
+const findGoal = (plan, id) => plan.goals.find((g) => g.id === id);
+const findPart = (plan, id) => { for (const g of plan.goals) { const p = g.parts.find((x) => x.id === id); if (p) return { g, p }; } return null; };
 
-// Ticking "Homework to 60%" moves the nearest open deadline for that homework up to 60%.
-function bumpDeadline(item) {
-  const d = deadlineFor(Object.values(store.state.deadlines), item, clock().today);
-  if (d && d.progress < item.hw) {
-    commit({ type: 'deadline', ...d, progress: item.hw });
-    toast(`${d.title} is now at ${item.hw}%`);
+// ---------- Goal actions ----------
+function placeGoal(goalId, d, quiet) {
+  const g = findGoal(store.state.plan, goalId);
+  if (!g) return;
+  if (g.parts.some((p) => p.day === d)) { toast(`Already on ${DAY_NAMES[d]}`); return; }
+  commitPlan((p) => { findGoal(p, goalId).parts.push({ id: uid(), day: d, note: '', at: Date.now() }); });
+  const days = sortedParts(findGoal(store.state.plan, goalId)).map((p) => short(p.day));
+  if (!quiet) toast(days.length > 1 ? `${g.title}: split over ${andList(days)}` : `${g.title}: ${DAY_NAMES[d]}`);
+}
+function movePart(partId, d) {
+  const f = findPart(store.state.plan, partId);
+  if (!f || f.p.day === d) return;
+  // The goal is already on that day: the two parts become one.
+  if (f.g.parts.some((p) => p.day === d)) {
+    commitPlan((p) => {
+      const { g, p: x } = findPart(p, partId);
+      const there = g.parts.find((q) => q.day === d);
+      if (x.note && !there.note) there.note = x.note;
+      g.parts = g.parts.filter((q) => q.id !== partId);
+    });
+    toast(`Joined with its ${DAY_NAMES[d]} part`);
+    return;
   }
+  commitPlan((p) => { const x = findPart(p, partId).p; x.day = d; x.at = Date.now(); });
+  toast(`Moved to ${DAY_NAMES[d]}`);
+}
+function removePart(partId, quiet) {
+  const f = findPart(store.state.plan, partId);
+  if (!f) return;
+  commitPlan((p) => { const g = findPart(p, partId).g; g.parts = g.parts.filter((x) => x.id !== partId); });
+  if (!quiet) toast(`Taken off ${DAY_NAMES[f.p.day]}`);
+}
+
+function addGoal() {
+  const input = document.getElementById('g-title');
+  const title = (input?.value || '').trim();
+  if (!title) { input?.focus(); return; }
+  const week = planWeek();
+  const course = ui.addCourse === 'auto' ? guessCourse(title) : ui.addCourse;
+  const repeat = ui.addRepeat;
+  ui.addTitle = ''; ui.addRepeat = false;
+  input.value = ''; input.blur();
+  commitPlan((p) => {
+    if (repeat) p.repeats.push({ id: uid(), title, course, since: week, usual: [] });
+    else p.goals.push({ id: uid(), title, course, week, parts: [] });
+  });
+  toast(repeat ? 'Added. It comes back every week.' : 'Goal added');
+  document.getElementById('g-title')?.focus({ preventScroll: true });
 }
 
 // ---------- Rendering ----------
 function syncHTML() {
   const map = {
     ok: 'Synced', pending: `Saving ${store.outbox.length}`, offline: 'Offline', error: 'Sync failed',
-    auth: 'Key rejected', loading: 'Loading', idle: '',
+    auth: 'Key rejected', loading: 'Loading', idle: '', demo: 'Preview',
   };
-  const cls = ui.sync === 'ok' ? '' : ui.sync === 'pending' || ui.sync === 'loading' ? 'pending' : ui.sync === 'offline' ? 'offline' : 'error';
+  const cls = ui.sync === 'ok' ? '' : ui.sync === 'pending' || ui.sync === 'loading' || ui.sync === 'demo' ? 'pending' : ui.sync === 'offline' ? 'offline' : 'error';
   return `<span class="sync ${cls}" role="status"><i></i>${map[ui.sync] ?? ''}</span>`;
 }
 
@@ -175,449 +239,209 @@ function headerHTML(title, sub) {
   return `<header class="top"><div><h1>${esc(title)}</h1>${sub ? `<p class="sub">${esc(sub)}</p>` : ''}</div>${syncHTML()}</header>`;
 }
 
-function examStripHTML() {
-  const { today } = clock();
-  const ex = upcomingExams(store.state.settings, today).slice(0, 8);
-  if (!ex.length) return '';
-  return `<div class="exams" aria-label="Exam countdown">${ex.map((e) => {
-    const n = daysBetween(today, e.date);
-    return `<span class="chip ${n <= 7 ? 'near' : ''}">${sw(e.course)}${esc(COURSES[e.course]?.short || e.course)}${e.moed === 'B' ? ' B' : ''} <b>${n === 0 ? 'today' : n + 'd'}</b></span>`;
-  }).join('')}</div>`;
+// Seven small day marks for a goal: outlined where it's placed, filled once that day is ticked.
+function dotsHTML(g, wt) {
+  const on = new Map(g.parts.map((p) => [p.day, p]));
+  const days = sortedParts(g).map((p) => DAY_NAMES[p.day]);
+  return `<span class="dots" style="--c:var(--${COURSES[g.course] ? esc(g.course) : 'fg'})" role="img" aria-label="${days.length ? `On ${esc(andList(days))}` : 'Not on any day'}">${DAY_NAMES.map((n, d) => {
+    const p = on.get(d);
+    return `<i class="${p ? (partDone(wt, g, p) ? 'done' : 'on') : ''}">${n[0]}</i>`;
+  }).join('')}</span>`;
 }
 
-function effortHTML(week, item, effort) {
-  const opt = [[-1, 'Less'], [0, 'As planned'], [1, 'More']];
-  return `<div class="effort"><span>Effort</span>${opt.map(([v, l]) =>
-    `<button type="button" class="seg" data-act="effort" data-week="${esc(week)}" data-item="${esc(item)}" data-v="${v}" aria-pressed="${effort === v}">${l}</button>`).join('')}</div>`;
-}
-
-function dueTagHTML(item, date) {
-  if (!date || !dueOn(Object.values(store.state.deadlines), item, date)) return '';
-  const { today } = clock();
-  return `<span class="tag due">${date === today ? 'due today' : `due ${DAY_NAMES[new Date(date + 'T12:00:00Z').getUTCDay()].slice(0, 3)}`}</span>`;
-}
-
-function itemHTML(item, week, opts = {}) {
-  const t = store.state.ticks[week]?.[item.id];
-  const done = !!t?.done;
-  return `<li class="item${item.optional ? ' optional' : ''}${done ? ' done' : ''}">
-    <input type="checkbox" class="check" id="chk-${esc(week)}-${esc(item.id)}" data-act="tick" data-week="${esc(week)}" data-item="${esc(item.id)}"${done ? ' checked' : ''} aria-label="${esc(cname(item.course))}: ${esc(item.tasks[0] || '')}">
-    <div class="item-body">
-      <div class="meta">${sw(item.course)}<span class="c">${esc(cname(item.course))}</span><span class="when">${esc(opts.when ?? item.when)}</span>${item.optional ? '<span class="tag">optional</span>' : ''}${opts.late ? '<span class="tag late">late</span>' : ''}${done ? '' : dueTagHTML(item, opts.date)}</div>
-      <ul class="tasks">${item.tasks.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>
-      ${done && !item.optional && item.course !== 'flex' && opts.effort !== false ? effortHTML(week, item.id, t.effort ?? null) : ''}
-    </div>
+// One goal on one day: a tick box, the goal, and that day's note.
+function partHTML(x, week, opts = {}) {
+  const { goal: g, part: p } = x;
+  const wt = store.state.ticks[week] || {};
+  const done = partDone(wt, g, p);
+  const tags = `${x.of > 1 ? `<span class="tag">part ${x.n} of ${x.of}</span>` : ''}${opts.late && !done ? `<span class="tag late">${opts.from != null ? esc(short(opts.from)) : 'late'}</span>` : ''}`;
+  return `<li class="part${done ? ' done' : ''}"${opts.drag ? ` data-drag="part" data-id="${esc(p.id)}"` : ''}>
+    ${opts.drag ? GRIP : ''}
+    <input type="checkbox" class="check" id="chk-${esc(p.id)}" data-act="tick" data-week="${esc(week)}" data-item="${esc(p.id)}" data-goal="${esc(g.id)}"${done ? ' checked' : ''} aria-label="${esc(g.title)}${p.note ? ', ' + esc(p.note) : ''}">
+    <button type="button" class="part-body" data-act="open-goal" data-id="${esc(g.id)}" data-part="${esc(p.id)}">
+      <span class="t">${sw(g.course)}<span>${esc(g.title)}</span></span>
+      ${p.note ? `<span class="note">${esc(p.note)}</span>` : ''}
+      ${tags ? `<span class="meta">${tags}</span>` : ''}
+    </button>
+    ${opts.move && !done ? `<button type="button" class="btn small-btn" data-act="part-today" data-id="${esc(p.id)}">To today</button>` : ''}
   </li>`;
 }
 
-function alertsHTML() {
+function goalHTML(g, week, opts = {}) {
   const s = store.state;
-  const { today, dow, week } = clock();
-  let h = '';
-
-  const urgent = Object.values(s.deadlines).filter((d) => !d.deleted && ['soon', 'late'].includes(deadlineStatus(d, today)))
-    .sort((a, b) => a.due.localeCompare(b.due));
-  if (urgent.length) {
-    const late = urgent.some((d) => deadlineStatus(d, today) === 'late');
-    h += `<section class="card alert${late ? ' bad' : ''}"><h2>${ICON_CLOCK}Deadlines close</h2><ul class="list">${urgent.map((d) => `
-      <li><div class="grow"><div class="meta">${sw(d.course)}<span class="c">${esc(d.title)}</span></div>
-      <div class="small">${esc(dueText(d.due, today))} · at ${d.progress}%</div></div></li>`).join('')}</ul>
-      <div class="row"><a class="btn" href="#deadlines">Update progress</a></div></section>`;
-  }
-
-  const behind = overdueItems(s.plan, s.ticks[week], dow, week);
-  if (behind.length) {
-    h += `<section class="card alert"><div class="card-head"><h2>${ICON_WARN}Behind this week</h2><span class="small muted">${plural(behind.length, 'target')}</span></div>
-      <ul class="items">${behind.map(({ day, item }) => itemHTML(item, week, { when: DAY_NAMES[day], late: false, effort: false })).join('')}</ul>
-      <p class="small muted">Thursday’s catch-up block is for these.</p></section>`;
-  }
-
-  if (dow <= 2) {
-    const prev = addDays(week, -7);
-    const pt = s.ticks[prev];
-    if (pt && Object.keys(pt).length && !pt.__dismissed?.done) {
-      const left = overdueItems(s.plan, pt, 7, prev);
-      if (left.length) {
-        h += `<section class="card alert"><div class="card-head"><h2>${ICON_WARN}Left from last week</h2><span class="small muted">${plural(left.length, 'target')}</span></div>
-          <ul class="items">${left.map(({ day, item }) => itemHTML(item, prev, { when: DAY_NAMES[day], effort: false })).join('')}</ul>
-          <div class="row"><button type="button" class="btn" data-act="dismiss-leftovers" data-week="${prev}">Clear this list</button></div></section>`;
-      }
-    }
-  }
-  return h;
-}
-
-function tabsHTML() {
-  const s = store.state;
-  const { dow, week } = clock();
   const wt = s.ticks[week] || {};
-  return `<div class="tabs" role="tablist" aria-label="Days">${s.plan.days.map((d, i) => {
-    const req = required(d.items, week);
-    const done = req.filter((x) => wt[x.id]?.done).length;
-    const missed = i < dow ? req.length - done : 0;
-    return `<button type="button" role="tab" id="tab-${i}" class="tab${i === dow ? ' today' : ''}${req.length && done === req.length ? ' full' : ''}" aria-selected="${i === ui.day}" data-act="day" data-day="${i}">
-      <span class="d">${DAY_NAMES[i].slice(0, 3)}</span><span class="p">${done}/${req.length}</span>${missed ? `<span class="badge" aria-label="${missed} missed">${missed}</span>` : ''}</button>`;
-  }).join('')}</div>`;
+  const done = goalDone(wt, g);
+  const loose = !g.parts.length && !done;
+  return `<li class="goal${done ? ' done' : ''}${loose ? ' loose' : ''}"${opts.drag ? ` data-drag="goal" data-id="${esc(g.id)}"` : ''}>
+    ${opts.drag ? GRIP : ''}
+    <button type="button" class="goal-body" data-act="open-goal" data-id="${esc(g.id)}">
+      <span class="t">${sw(g.course)}<span>${esc(g.title)}</span>${repeatOf(s.plan, g) ? ICON_REPEAT : ''}</span>
+      <span class="goal-sub">${dotsHTML(g, wt)}${done ? '<span class="tag ok">done</span>' : loose ? '<span class="tag warn">no day yet</span>' : ''}</span>
+    </button>
+  </li>`;
 }
 
-function courseOptions(selected, includeMeta = true) {
-  return Object.keys(COURSES).filter((k) => includeMeta || COURSES[k].track)
-    .map((k) => `<option value="${k}"${k === selected ? ' selected' : ''}>${esc(COURSES[k].name)}</option>`).join('');
-}
-
-function itemFormHTML(item) {
-  const isNew = !item;
-  item ||= { course: 'sig', when: '', tasks: [], optional: false, hw: null };
-  return `<div class="editbox" data-form="item" data-id="${isNew ? 'new' : esc(item.id)}">
-    <div class="row">
-      <label class="field"><span>Course</span><select id="f-course">${courseOptions(item.course)}</select></label>
-      <label class="field"><span>When</span><input type="text" id="f-when" value="${esc(item.when)}" placeholder="morning"></label>
-    </div>
-    <label class="field"><span>What to do, one per line</span><textarea id="f-tasks" placeholder="Homework to 50%">${esc(item.tasks.join('\n'))}</textarea></label>
-    <div class="row">
-      <label class="field" style="max-width:150px"><span>Homework % reached</span><input type="number" id="f-hw" min="0" max="100" step="5" value="${item.hw ?? ''}" placeholder="none"></label>
-      <label class="toggle"><input type="checkbox" id="f-opt"${item.optional ? ' checked' : ''}> Optional (no warning if skipped)</label>
-    </div>
-    <p class="msg err" id="f-err" hidden></p>
-    <div class="row end"><button type="button" class="btn ghost" data-act="cancel-edit">Cancel</button><button type="button" class="btn primary" data-act="save-item">${isNew ? 'Add target' : 'Save'}</button></div>
-  </div>`;
-}
-
-function dayCardHTML() {
-  const s = store.state;
-  const { week } = clock();
-  const i = ui.day;
-  const d = s.plan.days[i];
-  const wt = s.ticks[week] || {};
-  const req = required(d.items, week);
-  const done = req.filter((x) => wt[x.id]?.done).length;
-  const date = addDays(week, i);
-  const dls = Object.values(s.deadlines);
-  const shown = d.items.filter((it) => wt[it.id]?.done || targetOpen(dls, it, date));
-  const hidden = d.items.filter((it) => !shown.includes(it));
-
-  if (ui.editing) {
-    return `<section class="card" role="tabpanel" aria-labelledby="tab-${i}">
-      <div class="card-head"><h2>Edit ${DAY_NAMES[i]}</h2><button type="button" class="btn primary" data-act="stop-edit">Done</button></div>
-      <label class="field"><span>Hours</span><input type="text" id="f-hours" data-act="hours" value="${esc(d.hours)}"></label>
-      <p class="label">Classes</p>
-      <ul class="list">${d.classes.map((c) => `<li><span class="mono small muted" style="width:40px">${esc(c.time)}</span>${sw(c.course)}<span class="grow">${esc(c.label)}</span>
-        ${ui.confirm === 'cls-' + c.id
-          ? `<button type="button" class="btn danger" data-act="del-class" data-id="${esc(c.id)}">Delete</button><button type="button" class="btn ghost" data-act="cancel-confirm">Keep</button>`
-          : `<button type="button" class="btn ghost" data-act="confirm" data-key="cls-${esc(c.id)}" aria-label="Delete class">Delete</button>`}</li>`).join('') || '<li class="muted small">No classes.</li>'}</ul>
-      ${ui.editId === 'new-class' ? `<div class="editbox" data-form="class">
-        <div class="row"><label class="field" style="max-width:110px"><span>Time</span><input type="text" id="fc-time" placeholder="9:30"></label>
-        <label class="field"><span>Course</span><select id="fc-course">${courseOptions('sig', false)}</select></label></div>
-        <label class="field"><span>Label</span><input type="text" id="fc-label" placeholder="Signals lecture"></label>
-        <p class="msg err" id="fc-err" hidden></p>
-        <div class="row end"><button type="button" class="btn ghost" data-act="cancel-edit">Cancel</button><button type="button" class="btn primary" data-act="save-class">Add class</button></div></div>`
-        : '<div class="row"><button type="button" class="btn" data-act="edit" data-id="new-class">Add class</button></div>'}
-      <p class="label">Targets</p>
-      <ul class="list">${d.items.map((it) => ui.editId === it.id ? `<li style="display:block">${itemFormHTML(it)}</li>` : `<li>
-        <div class="grow"><div class="meta">${sw(it.course)}<span class="c">${esc(cname(it.course))}</span><span class="when">${esc(it.when)}</span>${it.optional ? '<span class="tag">optional</span>' : ''}${it.hw != null ? `<span class="tag">HW ${it.hw}%</span>` : ''}</div>
-        <ul class="tasks">${it.tasks.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div>
-        <div class="row" style="flex-direction:column;gap:2px">
-          <button type="button" class="btn ghost" data-act="edit" data-id="${esc(it.id)}">Edit</button>
-          ${ui.confirm === 'item-' + it.id
-            ? `<button type="button" class="btn danger" data-act="del-item" data-id="${esc(it.id)}">Delete</button><button type="button" class="btn ghost" data-act="cancel-confirm">Keep</button>`
-            : `<button type="button" class="btn ghost" data-act="confirm" data-key="item-${esc(it.id)}">Delete</button>`}
-        </div></li>`).join('')}</ul>
-      ${ui.editId === 'new' ? itemFormHTML(null) : `<div class="row"><button type="button" class="btn" data-act="edit" data-id="new">Add target</button>
-        ${!d.items.length ? '' : ui.confirm === 'clear-day'
-          ? `<button type="button" class="btn danger" data-act="clear-day">Clear all ${d.items.length}</button><button type="button" class="btn ghost" data-act="cancel-confirm">Keep</button>`
-          : '<button type="button" class="btn ghost" data-act="confirm" data-key="clear-day">Clear all targets</button>'}</div>`}
-    </section>`;
-  }
-
-  return `<section class="card" role="tabpanel" aria-labelledby="tab-${i}">
-    <div class="card-head"><h2>${DAY_NAMES[i]} <span class="muted small mono" style="font-weight:400">${esc(d.hours)}</span></h2>
-      <div class="row"><span class="mono small muted">${done}/${req.length}</span><button type="button" class="btn ghost" data-act="start-edit">Edit</button></div></div>
-    ${d.classes.length ? `<p class="label">Classes</p><ul class="classes">${d.classes.map((c) => `<li><span class="t">${esc(c.time)}</span>${sw(c.course)}<span>${esc(c.label)}</span></li>`).join('')}</ul>` : ''}
-    <p class="label">Targets</p>
-    ${d.items.length ? `<ul class="items">${shown.map((it) => itemHTML(it, week, { date })).join('')}</ul>` : '<p class="muted small">Nothing planned. Tap Edit to add a target.</p>'}
-    ${hidden.length ? `<p class="small muted">${plural(hidden.length, 'optional target')} hidden: no ${esc(hidden.map(hwName).join(', '))} deadline this week. Add one in Deadlines and ${hidden.length === 1 ? 'it shows' : 'they show'} up here.</p>` : ''}
-  </section>`;
-}
-
-const hwName = (it) => `${COURSES[it.course]?.name || it.course} ${it.match === 'webwork' ? 'WeBWorK' : it.match === 'moodle' ? 'Moodle' : it.match}`;
-
-// Homework ladders for the week: one row per homework, one cell per day with a target.
-function homeworkCardHTML() {
-  const s = store.state;
-  const { today, dow, week } = clock();
-  const dls = Object.values(s.deadlines);
-  const wt = s.ticks[week] || {};
-  const rows = homeworkLadders(s.plan).map((r) => {
-    let behind = false, any = false;
-    const cells = r.days.map((items, day) => {
-      const live = items.filter((it) => wt[it.id]?.done || targetOpen(dls, it, addDays(week, day)));
-      if (!live.length) return '<span></span>';
-      any = true;
-      const done = live.every((it) => wt[it.id]?.done);
-      const counts = required(live, week).length > 0;
-      const missed = !done && day < dow && counts;
-      if (missed) behind = true;
-      const pct = Math.max(...live.map((it) => it.hw));
-      const cls = done ? 'done' : missed ? 'missed' : day === dow ? 'today' : counts ? '' : 'opt';
-      const state = done ? 'done' : missed ? 'not done' : day === dow ? 'today' : 'coming up';
-      return `<button type="button" class="cell ${cls}" style="--c:var(--${esc(r.course)})" data-act="day" data-day="${day}" aria-label="${esc(cname(r.course))} ${esc(r.kind)} to ${pct}% on ${DAY_NAMES[day]}, ${state}">${pct}</button>`;
-    });
-    const first = r.days.flat()[0];
-    const d = deadlineFor(dls, first, today);
-    return { r, cells, behind, any, d };
-  }).filter((x) => x.any);
-  if (!rows.length) return '';
-  const open = LS.get('sp-hw-open', true);
-  const behind = rows.filter((x) => x.behind).length;
-  const head = `<div class="card-head"><h2>Homework this week</h2>
-    <div class="row"><span class="small ${behind ? '' : 'muted'}"${behind ? ' style="color:var(--warn)"' : ''}>${behind ? `${behind} behind` : 'on track'}</span>
-    <button type="button" class="btn ghost" data-act="toggle-hw" aria-expanded="${open}">${open ? 'Hide' : 'Show'}</button></div></div>`;
-  if (!open) return `<section class="card">${head}</section>`;
-  return `<section class="card">${head}
-    <div class="hw">
-      <span></span>${DAY_NAMES.map((n, i) => `<span class="hd${i === dow ? ' today' : ''}">${n.slice(0, 2)}</span>`).join('')}
-      ${rows.map(({ r, cells, d }) => `<div class="nm"><b>${sw(r.course)}<span>${esc(COURSES[r.course].short)}${r.kind ? ' ' + esc(r.kind) : ''}</span></b>
-        ${d ? `<span class="dl-due ${deadlineStatus(d, today)}">${esc(dueShort(d.due, today))}</span>` : ''}</div>
-        ${cells.join('')}`).join('')}
-    </div>
-    <p class="small muted">Each number is the percent to reach that day. Filled is done, orange is behind. Tap one to open its day.</p>
-  </section>`;
-}
-
-function dueShort(due, today) {
-  const n = daysBetween(today, due);
-  return n < 0 ? `${plural(-n, 'day')} late` : n === 0 ? 'due today' : n === 1 ? 'due tomorrow' : `due ${fmtShortDate(due)}`;
-}
-
-function examCardHTML() {
-  const { today } = clock();
-  const p = examPrep(store.state.settings, today);
-  if (!p) return '';
-  const c = p.exam.course;
-  return `<section class="card">
-    <p class="label">Exam prep</p>
-    <div class="exam-big"><span class="big">${p.daysLeft === 0 ? 'Today' : p.daysLeft}</span><span>${p.daysLeft === 0 ? '' : p.daysLeft === 1 ? 'day until' : 'days until'} <b>${esc(cname(c))}</b>${p.exam.moed === 'B' ? ' (Moed B)' : ''}</span></div>
-    <div><span class="phase" style="--c:var(--${esc(c)})">${esc(p.phase)}</span> <span class="small muted">day ${p.index + 1} of ${p.total} for this exam</span></div>
-    <ul class="items">${p.tasks.map((t, k) => itemHTML({ id: `${today}-${k}`, course: c, when: 'today', tasks: [t], optional: false }, 'exam', { effort: false })).join('')}</ul>
-    <div class="row"><button type="button" class="btn" data-act="toggle-week">${ui.showWeek ? 'Hide the weekly plan' : 'Show the weekly plan'}</button></div>
-  </section>`;
-}
-
-const ICON_FLAG = '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 21V4M5 4h11l-2 4 2 4H5"/></svg>';
-
-function goalFormHTML(g) {
-  const isNew = !g;
-  g ||= { title: '', course: '', target: 1, recurring: false };
-  const { week } = clock();
-  const n = activeGoals(store.state.plan, week).length;
-  return `<div class="editbox" data-form="goal" data-id="${isNew ? 'new' : esc(g.id)}">
-    <label class="field"><span>Goal</span><input type="text" id="g-title" value="${esc(g.title)}" placeholder="Watch the missed Signals recording"></label>
-    <div class="row">
-      <label class="field"><span>Course</span><select id="g-course"><option value="">General</option>${TRACKED.map((k) => `<option value="${k}"${k === g.course ? ' selected' : ''}>${esc(COURSES[k].name)}</option>`).join('')}</select></label>
-      <label class="field" style="max-width:110px"><span>Times</span><input type="number" id="g-target" min="1" max="99" step="1" value="${g.target || 1}"></label>
-    </div>
-    <label class="toggle"><input type="checkbox" id="g-rec"${g.recurring ? ' checked' : ''}> Repeat every week</label>
-    ${isNew && n >= GOAL_SOFT_CAP ? `<p class="small" style="color:var(--warn)">You already have ${n} goals this week. Past five, goals usually work better as targets on a specific day.</p>` : ''}
-    <p class="msg err" id="g-err" hidden></p>
-    <div class="row end"><button type="button" class="btn ghost" data-act="goal-cancel">Cancel</button><button type="button" class="btn primary" data-act="goal-save">${isNew ? 'Add goal' : 'Save'}</button></div>
-  </div>`;
-}
-
-function goalRowHTML(g, week) {
-  const wt = store.state.ticks[week];
-  const n = goalCount(wt, g), target = g.target || 1, done = goalDone(wt, g);
-  const meta = `<div class="meta">${g.course ? sw(g.course) + `<span class="c">${esc(cname(g.course))}</span>` : ''}${g.recurring ? '<span class="tag">every week</span>' : ''}</div>`;
-  const title = `<div class="goal-title">${esc(g.title)}</div>`;
-  if (ui.goalEdit) {
-    if (ui.goalForm === g.id) return `<li style="display:block">${goalFormHTML(g)}</li>`;
-    return `<li class="item"><div class="item-body">${meta}${title}</div>
-      <div class="row" style="flex-direction:column;gap:2px">
-        <button type="button" class="btn ghost" data-act="goal-edit" data-id="${esc(g.id)}">Edit</button>
-        ${ui.confirm === 'goal-' + g.id
-          ? `<button type="button" class="btn danger" data-act="goal-delete" data-id="${esc(g.id)}">Delete</button><button type="button" class="btn ghost" data-act="cancel-confirm">Keep</button>`
-          : `<button type="button" class="btn ghost" data-act="confirm" data-key="goal-${esc(g.id)}">Delete</button>`}
-      </div></li>`;
-  }
-  if (target === 1) {
-    return `<li class="item${done ? ' done' : ''}">
-      <input type="checkbox" class="check" id="goal-${esc(g.id)}" data-act="goal-check" data-id="${esc(g.id)}"${done ? ' checked' : ''} aria-label="${esc(g.title)}">
-      <div class="item-body">${meta}${title}</div></li>`;
-  }
-  return `<li class="item${done ? ' done' : ''}">
-    <div class="counter-n mono" aria-label="${n} of ${target}">${Math.min(n, target)}/${target}</div>
-    <div class="item-body">${meta}${title}
-      <div class="bar" style="--c:var(--${esc(g.course || 'fg')})"><i style="width:${Math.min(100, Math.round(100 * n / target))}%"></i></div></div>
-    <div class="row" style="gap:4px;flex-wrap:nowrap">
-      <button type="button" class="btn ghost" data-act="goal-step" data-id="${esc(g.id)}" data-v="-1" aria-label="One less"${n === 0 ? ' disabled' : ''}>−1</button>
-      <button type="button" class="btn" data-act="goal-step" data-id="${esc(g.id)}" data-v="1" aria-label="One more">+1</button>
-    </div></li>`;
-}
-
-function goalsCardHTML() {
-  const s = store.state;
-  const { week, dow } = clock();
-  const goals = activeGoals(s.plan, week);
-  const wt = s.ticks[week];
-  const open = goals.filter((g) => !goalDone(wt, g));
-  const flagged = dow >= GOAL_FLAG_DOW && open.length && !ui.goalEdit;
-  const head = flagged
-    ? `<h2>${ICON_FLAG}This week · ${plural(open.length, 'goal')} open</h2>`
-    : `<h2>This week</h2>`;
-  let body;
-  if (!goals.length && !ui.goalForm) {
-    body = `<p class="small muted">Goals that don’t belong to a specific day, like watching a missed recording or going to office hours.</p>
-      <div class="row"><button type="button" class="btn" data-act="goal-new">Add a weekly goal</button></div>`;
-  } else {
-    body = `${goals.length ? `<ul class="items">${goals.map((g) => goalRowHTML(g, week)).join('')}</ul>` : ''}
-      ${ui.goalForm === 'new' ? goalFormHTML(null) : `<div class="row"><button type="button" class="btn ghost" data-act="goal-new">Add goal</button></div>`}
-      ${flagged ? '<p class="small muted">Thursday’s catch-up block is a good time for these.</p>' : ''}`;
-  }
-  return `<section class="card${flagged ? ' alert' : ''}">
-    <div class="card-head">${head}
-      <div class="row">${goals.length ? `<span class="mono small muted">${goals.length - open.length}/${goals.length}</span>` : ''}
-      ${goals.length ? `<button type="button" class="btn ghost" data-act="goal-mode">${ui.goalEdit ? 'Done' : 'Edit'}</button>` : ''}</div></div>
-    ${body}
-  </section>`;
-}
-
-function goalLeftoversHTML() {
+// Goals from last week that weren't finished: move what's left into this week, or drop it.
+function leftoversHTML() {
   const s = store.state;
   const { week } = clock();
   const prev = addDays(week, -7);
-  const left = (s.plan.goals || []).filter((g) => !g.recurring && !g.dropped && g.week === prev && !goalDone(s.ticks[prev], g));
+  const left = weekGoals(s.plan, prev).filter((g) => !goalDone(s.ticks[prev], g));
   if (!left.length) return '';
-  return `<section class="card alert"><h2>${ICON_FLAG}Unfinished goals from last week</h2>
+  return `<section class="card alert"><div class="card-head"><h2>${ICON_FLAG}Left from last week</h2><span class="small muted">${plural(left.length, 'goal')}</span></div>
     <ul class="list">${left.map((g) => {
-      const n = goalCount(s.ticks[prev], g);
-      return `<li><div class="grow"><div class="goal-title">${esc(g.title)}</div>
-        <div class="small muted">${g.course ? esc(cname(g.course)) + ' · ' : ''}${g.target > 1 ? `${n}/${g.target} done` : 'not done'}</div></div>
-        <div class="row" style="gap:4px"><button type="button" class="btn" data-act="goal-carry" data-id="${esc(g.id)}">Move to this week</button>
+      const n = g.parts.filter((p) => partDone(s.ticks[prev], g, p)).length;
+      return `<li><div class="grow"><div class="t">${sw(g.course)}<span>${esc(g.title)}</span></div>
+        <div class="small muted">${g.parts.length ? `${n} of ${plural(g.parts.length, 'day')} done` : 'was never placed on a day'}</div></div>
+        <div class="row tight"><button type="button" class="btn small-btn" data-act="goal-carry" data-id="${esc(g.id)}">Move to this week</button>
         <button type="button" class="btn ghost" data-act="goal-drop" data-id="${esc(g.id)}">Drop</button></div></li>`;
     }).join('')}</ul></section>`;
 }
 
-function viewWeek() {
+function viewToday() {
   const s = store.state;
-  const { today, dow } = clock();
-  if (ui.day == null) ui.day = dow;
+  const { today, dow, week } = clock();
+  const wt = s.ticks[week] || {};
+  const goals = weekGoals(s.plan, week);
   let h = headerHTML(DAY_NAMES[dow], fmtShortDate(today));
   if (ui.sync === 'auth') h += `<section class="card alert bad"><h2>${ICON_WARN}App key rejected</h2><p class="small">The server didn’t accept this device’s key. Check APP_KEY in Cloudflare, or sign out in Settings and enter it again.</p></section>`;
-  h += examStripHTML();
-  if (inExamMode(s.settings, today)) {
-    h += examCardHTML();
-    if (!ui.showWeek) return h;
+
+  if (dow === 6) {
+    const next = addDays(week, 7);
+    const left = planningLeft(s.plan, s.ticks[next], next);
+    if (left.unplaced || !left.goals) {
+      h += `<section class="card callout"><h2>Plan next week</h2>
+        <p class="small">${left.goals ? `${plural(left.unplaced, 'goal')} for ${esc(weekRange(next))} ${left.unplaced === 1 ? 'isn’t' : 'aren’t'} on a day yet.` : `No goals for ${esc(weekRange(next))} yet.`}</p>
+        <div class="row"><button type="button" class="btn primary" data-act="plan-open" data-which="next">Plan next week</button></div></section>`;
+    }
   }
-  h += alertsHTML() + goalLeftoversHTML() + goalsCardHTML() + homeworkCardHTML() + tabsHTML() + dayCardHTML();
+
+  h += leftoversHTML();
+
+  const late = lateParts(s.plan, wt, week, dow);
+  if (late.length) {
+    h += `<section class="card alert"><div class="card-head"><h2>${ICON_WARN}Behind</h2><span class="small muted">${late.length} from earlier days</span></div>
+      <ul class="parts">${late.map((x) => partHTML(x, week, { late: true, from: x.part.day, move: true })).join('')}</ul></section>`;
+  }
+
+  const loose = unplacedGoals(s.plan, wt, week);
+  if (loose.length) {
+    h += `<section class="card alert"><div class="card-head"><h2>${ICON_WARN}Not on any day</h2><span class="small muted">${plural(loose.length, 'goal')}</span></div>
+      <p class="small">${esc(andList(loose.map((g) => g.title)))}</p>
+      <div class="row"><button type="button" class="btn" data-act="plan-open" data-which="this">Put ${loose.length === 1 ? 'it' : 'them'} on a day</button></div></section>`;
+  }
+
+  const parts = dayParts(s.plan, week, dow);
+  const done = parts.filter((x) => partDone(wt, x.goal, x.part)).length;
+  const d = s.plan.days[dow];
+  h += `<section class="card"><div class="card-head"><h2>Today</h2><span class="mono small muted">${parts.length ? `${done}/${parts.length}` : esc(d.hours)}</span></div>
+    ${parts.length ? `<ul class="parts">${parts.map((x) => partHTML(x, week)).join('')}</ul>`
+      : `<p class="small muted">${goals.length ? 'Nothing is placed on today.' : 'No goals for this week yet.'}</p>
+         <div class="row"><button type="button" class="btn" data-act="plan-open" data-which="this">${goals.length ? 'Open the plan' : 'Plan this week'}</button></div>`}
+    ${d.classes.length ? `<p class="label">Classes</p><ul class="classes">${d.classes.map((c) => `<li><span class="ct">${esc(c.time)}</span>${sw(c.course)}<span>${esc(c.label)}</span></li>`).join('')}</ul>` : ''}
+  </section>`;
+
+  if (goals.length) {
+    const fin = goals.filter((g) => goalDone(wt, g)).length;
+    h += `<section class="card"><div class="card-head"><h2>This week’s goals</h2><span class="mono small muted">${fin}/${goals.length}</span></div>
+      <ul class="goals">${goals.map((g) => goalHTML(g, week)).join('')}</ul></section>`;
+  }
   return h;
 }
 
-function viewDeadlines() {
+function viewPlan() {
   const s = store.state;
-  const { today } = clock();
-  const all = Object.values(s.deadlines).filter((d) => !d.deleted);
-  const open = all.filter((d) => d.progress < 100).sort((a, b) => a.due.localeCompare(b.due));
-  const done = all.filter((d) => d.progress >= 100).sort((a, b) => b.due.localeCompare(a.due)).slice(0, 10);
-  const row = (d) => {
-    const st = deadlineStatus(d, today);
-    return `<li><div class="grow">
-      <div class="meta">${sw(d.course)}<span class="dl-title">${esc(d.title)}</span><span class="muted">${esc(cname(d.course))}</span></div>
-      <div class="dl-due ${st}">${esc(dueText(d.due, today))}</div>
-      <div class="bar" style="--c:var(--${esc(d.course)})"><i style="width:${d.progress}%"></i></div>
-      <div class="steps">${[0, 25, 50, 75, 100].map((v) => `<button type="button" class="seg" data-act="progress" data-id="${esc(d.id)}" data-v="${v}" aria-pressed="${d.progress === v}">${v}%</button>`).join('')}</div>
-    </div>
-    ${ui.confirm === 'dl-' + d.id
-      ? `<div class="row" style="flex-direction:column;gap:2px"><button type="button" class="btn danger" data-act="del-deadline" data-id="${esc(d.id)}">Delete</button><button type="button" class="btn ghost" data-act="cancel-confirm">Keep</button></div>`
-      : `<button type="button" class="btn ghost" data-act="confirm" data-key="dl-${esc(d.id)}" aria-label="Delete ${esc(d.title)}">Delete</button>`}
-    </li>`;
-  };
-  return headerHTML('Deadlines', 'Real due dates for homework and assignments') + `
-    <section class="card" data-form="deadline">
-      <h2>Add a deadline</h2>
+  const { today, dow, week } = clock();
+  const which = planWhich();
+  const w = planWeek();
+  const wt = s.ticks[w] || {};
+  const goals = weekGoals(s.plan, w);
+  const usual = goals.filter((g) => !g.parts.length && !goalDone(wt, g) && usualDays(s.plan, g).length);
+  const loose = unplacedGoals(s.plan, wt, w).length;
+
+  let h = headerHTML('Plan', weekRange(w));
+  h += `<div class="switch" role="tablist" aria-label="Week">
+    <button type="button" role="tab" aria-selected="${which === 'this'}" data-act="which" data-which="this">This week</button>
+    <button type="button" role="tab" aria-selected="${which === 'next'}" data-act="which" data-which="next">Next week</button></div>`;
+  if (which === 'this') h += leftoversHTML();
+
+  h += `<section class="card tray" data-drop="tray">
+    <div class="card-head"><h2>Goals</h2><span class="small ${loose ? 'warn-text' : 'muted'}">${goals.length ? (loose ? `${loose} without a day` : 'all on a day') : ''}</span></div>
+    ${goals.length ? `<ul class="goals">${goals.map((g) => goalHTML(g, w, { drag: true })).join('')}</ul>
+      <p class="small muted">Hold a goal and drag it to a day. Drag it again to split it over more days. Or tap it to pick the days.</p>`
+      : '<p class="small muted">Write what you want done this week, like “Probability HW”. Then put each goal on one or more days.</p>'}
+    ${usual.length ? `<div class="row"><button type="button" class="btn" data-act="usual">Put ${usual.length === 1 ? 'the repeating goal' : `${usual.length} repeating goals`} on ${usual.length === 1 ? 'its' : 'their'} usual days</button></div>` : ''}
+    <div class="addgoal">
+      <input type="text" id="g-title" data-act="add-title" value="${esc(ui.addTitle)}" placeholder="Add a goal" enterkeyhint="done" autocomplete="off" aria-label="New goal">
       <div class="row">
-        <label class="field"><span>Course</span><select id="d-course">${courseOptions('sig', false)}</select></label>
-        <label class="field"><span>Due</span><input type="date" id="d-due" min="${today}"></label>
+        <select id="g-course" data-act="add-course" aria-label="Course">
+          <option value="auto"${ui.addCourse === 'auto' ? ' selected' : ''}>Course: auto</option>
+          <option value=""${ui.addCourse === '' ? ' selected' : ''}>General</option>
+          ${TRACKED.map((k) => `<option value="${k}"${k === ui.addCourse ? ' selected' : ''}>${esc(COURSES[k].name)}</option>`).join('')}
+        </select>
+        <label class="toggle"><input type="checkbox" id="g-rec" data-act="add-repeat"${ui.addRepeat ? ' checked' : ''}> Every week</label>
+        <button type="button" class="btn primary" data-act="goal-add">Add</button>
       </div>
-      <label class="field"><span>Name</span><input type="text" id="d-title" placeholder="Quantum dry 3"></label>
-      <p class="msg err" id="d-err" hidden></p>
-      <div class="row end"><button type="button" class="btn primary" data-act="add-deadline">Add deadline</button></div>
-    </section>
-    <section class="card"><div class="card-head"><h2>Open</h2><span class="small muted">${open.length}</span></div>
-      ${open.length ? `<ul class="list">${open.map(row).join('')}</ul>` : '<p class="muted small">No open deadlines. Add each assignment when it’s published.</p>'}
-      <p class="small muted">Ticking a target like “Homework to 60%” raises the nearest deadline for that course to 60%. Quantum and Probability have several kinds of homework, so put the kind in the name: dry, Moodle, prep, written or WeBWorK.</p>
-    </section>
-    ${done.length ? `<section class="card"><h2>Finished</h2><ul class="list">${done.map((d) => `<li><div class="grow"><div class="meta">${sw(d.course)}<span class="c">${esc(d.title)}</span></div><div class="dl-due">${esc(fmtShortDate(d.due))}</div></div><button type="button" class="btn ghost" data-act="progress" data-id="${esc(d.id)}" data-v="75">Reopen</button></li>`).join('')}</ul></section>` : ''}`;
+    </div>
+  </section>`;
+
+  h += s.plan.days.map((d, i) => {
+    const date = addDays(w, i);
+    const parts = dayParts(s.plan, w, i);
+    const isToday = date === today;
+    const past = which === 'this' && i < dow;
+    return `<section class="card day${isToday ? ' today' : ''}" data-drop="day" data-day="${i}" aria-label="${DAY_NAMES[i]}">
+      <div class="card-head"><h2>${DAY_NAMES[i]} <span class="mono small muted">${esc(fmtShortDate(date))}</span>${isToday ? ' <span class="tag now">today</span>' : ''}</h2><span class="small muted">${esc(d.hours)}</span></div>
+      ${parts.length ? `<ul class="parts">${parts.map((x) => partHTML(x, w, { drag: true, late: past })).join('')}</ul>` : '<p class="empty">Nothing here yet</p>'}
+    </section>`;
+  }).join('');
+
+  // Shown only while dragging: a strip of days pinned to the bottom, so any day is one move away.
+  h += `<div class="dock" aria-hidden="true">
+    <div class="dock-off" data-drop="tray">Take it off this day</div>
+    <div class="dock-days">${s.plan.days.map((d, i) => {
+      const n = dayParts(s.plan, w, i).length;
+      return `<div class="dock-day${addDays(w, i) === today ? ' today' : ''}" data-drop="day" data-day="${i}"><b>${short(i)}</b><span>${n || ''}</span></div>`;
+    }).join('')}</div></div>`;
+  return h;
 }
 
-function viewStats() {
+// The goal sheet: rename, pick days (more than one splits the goal), a note per day, repeat, delete.
+function sheetHTML() {
+  if (!ui.sheet) return '';
   const s = store.state;
-  const { week } = clock();
-  const weeks = Array.from({ length: 8 }, (_, k) => addDays(week, -7 * (7 - k)));
-  const reqBy = {};
-  s.plan.days.forEach((d) => required(d.items, week).forEach((it) => { (reqBy[it.course] ||= []).push(it.id); }));
-  // Targets added in a later week don't count against the weeks before them.
-  const since = Object.fromEntries(s.plan.days.flatMap((d) => d.items).map((it) => [it.id, it.since || '']));
-  const pct = (c, w) => {
-    const ids = (reqBy[c] || []).filter((id) => since[id] <= w); if (!ids.length) return null;
-    const t = s.ticks[w] || {};
-    return Math.round(100 * ids.filter((id) => t[id]?.done).length / ids.length);
-  };
-  const allReq = Object.values(reqBy).flat();
-  const goalWeeks = weeks.map((w) => {
-    const g = activeGoals(s.plan, w); if (!g.length) return null;
-    return Math.round(100 * g.filter((x) => goalDone(s.ticks[w], x)).length / g.length);
-  });
-  const thisGoals = activeGoals(s.plan, week);
-  const thisGoalsDone = thisGoals.filter((x) => goalDone(s.ticks[week], x)).length;
-  const thisDone = allReq.filter((id) => s.ticks[week]?.[id]?.done).length;
-  const used = weeks.filter((w) => s.ticks[w] && Object.keys(s.ticks[w]).length);
-  const courses = TRACKED.filter((c) => reqBy[c]);
-
-  const recent = weeks.slice(-4);
-  const effort = {};
-  for (const c of courses) {
-    const e = { less: 0, same: 0, more: 0 };
-    for (const w of recent) for (const id of reqBy[c]) {
-      const v = s.ticks[w]?.[id]?.effort;
-      if (v === -1) e.less++; else if (v === 0) e.same++; else if (v === 1) e.more++;
-    }
-    effort[c] = e;
-  }
-  const heavy = courses.filter((c) => effort[c].more >= 3 && effort[c].more > effort[c].same + effort[c].less);
-  const light = courses.filter((c) => effort[c].less >= 3 && effort[c].less > effort[c].same + effort[c].more);
-  const avg = (c) => {
-    const ws = recent.slice(0, -1).filter((w) => used.includes(w));
-    if (!ws.length) return null;
-    return Math.round(ws.reduce((a, w) => a + pct(c, w), 0) / ws.length);
-  };
-
-  return headerHTML('Stats', 'Required targets only') + `
-    <section class="card"><p class="label">This week</p>
-      <div class="stats-row"><div><div class="big">${allReq.length ? Math.round(100 * thisDone / allReq.length) : 0}%</div><div class="small muted">${thisDone} of ${allReq.length} targets</div></div>
-      ${thisGoals.length ? `<div><div class="big">${thisGoalsDone}/${thisGoals.length}</div><div class="small muted">weekly goals</div></div>` : ''}</div>
-    </section>
-    <section class="card"><h2>Completion by course</h2>
-      <div style="overflow-x:auto"><div class="chart" style="--n:${weeks.length}">
-        ${courses.map((c) => `<span class="rl">${esc(COURSES[c].short)}</span>${weeks.map((w) => {
-          const p = pct(c, w) ?? 0;
-          return `<span class="cell${w === week ? ' now' : ''}" title="${esc(cname(c))}, week of ${fmtShortDate(w)}: ${p}%" style="--c:var(--${c})"><i style="height:${p}%"></i></span>`;
-        }).join('')}`).join('')}
-        ${goalWeeks.some((x) => x != null) ? `<span class="rl">Goals</span>${weeks.map((w, k) => {
-          const p = goalWeeks[k];
-          return `<span class="cell${w === week ? ' now' : ''}" title="Weekly goals, week of ${fmtShortDate(w)}: ${p == null ? 'none' : p + '%'}" style="--c:var(--fg)"><i style="height:${p ?? 0}%"></i></span>`;
-        }).join('')}` : ''}
-        <span></span>${weeks.map((w) => `<span class="wk">${fmtShortDate(w).split(' ')[0]}</span>`).join('')}
-      </div></div>
-      <p class="small muted">Each column is a week, labeled by its Sunday. The outlined column is this week.${goalWeeks.some((x) => x != null) ? ' The Goals row is the share of weekly goals finished.' : ''}</p>
-      ${courses.some((c) => avg(c) != null) ? `<p class="small">Last 3 weeks: ${courses.map((c) => `${COURSES[c].short} ${avg(c) ?? '–'}%`).join(' · ')}</p>` : ''}
-    </section>
-    <section class="card"><h2>Effort, last 4 weeks</h2>
-      <table class="effort-table"><thead><tr><th>Course</th><th>Less</th><th>As planned</th><th>More</th></tr></thead><tbody>
-        ${courses.map((c) => `<tr><td>${sw(c)} ${esc(cname(c))}</td><td>${effort[c].less}</td><td>${effort[c].same}</td><td class="${heavy.includes(c) ? 'hi' : ''}">${effort[c].more}</td></tr>`).join('')}
-      </tbody></table>
-      ${heavy.length ? `<p class="small">${heavy.map(cname).join(', ')} keep${heavy.length === 1 ? 's' : ''} taking more than planned. Consider splitting the homework over one more day.</p>` : ''}
-      ${light.length ? `<p class="small">${light.map(cname).join(', ')} keep${light.length === 1 ? 's' : ''} taking less than planned. You could merge two of its targets.</p>` : ''}
-      ${!heavy.length && !light.length ? '<p class="small muted">Tag effort on finished targets. After a few weeks this shows which courses need more time.</p>' : ''}
-    </section>`;
+  const g = findGoal(s.plan, ui.sheet.goalId);
+  if (!g || g.deleted) { ui.sheet = null; return ''; }
+  const wt = s.ticks[g.week] || {};
+  const parts = sortedParts(g);
+  const whole = !!wt[g.id]?.done;
+  const done = goalDone(wt, g);
+  const rep = repeatOf(s.plan, g);
+  const id = esc(g.id);
+  let del;
+  if (ui.confirm === 'del-goal') {
+    del = rep
+      ? `<button type="button" class="btn danger" data-act="goal-skip" data-id="${id}">Skip this week only</button><button type="button" class="btn danger" data-act="goal-delete" data-id="${id}">Delete for good</button><button type="button" class="btn ghost" data-act="cancel-confirm">Keep</button>`
+      : `<button type="button" class="btn danger" data-act="goal-delete" data-id="${id}">Delete goal</button><button type="button" class="btn ghost" data-act="cancel-confirm">Keep</button>`;
+  } else del = `<button type="button" class="btn ghost danger" data-act="confirm" data-key="del-goal">Delete</button>`;
+  return `<div class="scrim" data-act="sheet-close"></div>
+  <section class="sheet" role="dialog" aria-modal="true" aria-label="Goal">
+    <div class="card-head"><p class="label">Goal · ${esc(weekRange(g.week))}</p><button type="button" class="btn primary" data-act="sheet-close">Done</button></div>
+    <label class="field"><span>Goal</span><input type="text" id="s-title" data-act="goal-title" data-id="${id}" value="${esc(g.title)}" autocomplete="off"></label>
+    <label class="field"><span>Course</span><select id="s-course" data-act="goal-course" data-id="${id}">
+      <option value="">General</option>${TRACKED.map((k) => `<option value="${k}"${k === g.course ? ' selected' : ''}>${esc(COURSES[k].name)}</option>`).join('')}</select></label>
+    <div class="field"><span>Days${parts.length > 1 ? ` · split over ${parts.length}` : ''}</span>
+      <div class="daypick" role="group" aria-label="Days for this goal">${DAY_NAMES.map((n, d) =>
+        `<button type="button" class="seg" data-act="goal-day" data-id="${id}" data-day="${d}" aria-pressed="${g.parts.some((p) => p.day === d)}">${n.slice(0, 3)}</button>`).join('')}</div>
+      <p class="small muted">${parts.length ? 'Pick more days to split the goal between them.' : 'Pick one day, or several to split the goal between them.'}</p></div>
+    ${parts.map((p) => `<label class="field"><span>${DAY_NAMES[p.day]}${partDone(wt, g, p) ? ' · done' : ''}</span>
+      <input type="text" id="note-${esc(p.id)}" data-act="part-note" data-id="${esc(p.id)}" value="${esc(p.note)}" placeholder="Note for this day, like “questions 1–3”" autocomplete="off"></label>`).join('')}
+    <label class="toggle"><input type="checkbox" id="s-rep" data-act="goal-repeat" data-id="${id}"${rep ? ' checked' : ''}> Repeat every week</label>
+    <div class="row between">
+      <button type="button" class="btn" data-act="goal-whole" data-id="${id}">${whole ? 'Mark as not done' : done ? 'Done' : 'Mark the whole goal done'}</button>
+      <div class="row tight">${del}</div>
+    </div>
+  </section>`;
 }
 
 function timeField(id, label, value) {
@@ -626,78 +450,51 @@ function timeField(id, label, value) {
 
 function viewSettings() {
   const s = store.state;
-  const r = s.settings.reminders;
+  const r = s.settings.reminders || DEFAULT_SETTINGS.reminders;
   const push = ui.push;
   const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
   let pushLine;
-  if (!s.vapidPublic) pushLine = 'The server has no notification keys yet. Add VAPID_PUBLIC and VAPID_PRIVATE in Cloudflare.';
+  if (DEMO) pushLine = 'This is a preview. Reminders work in the installed app.';
+  else if (!s.vapidPublic) pushLine = 'The server has no notification keys yet. Add VAPID_PUBLIC and VAPID_PRIVATE in Cloudflare.';
   else if (!('PushManager' in window)) pushLine = standalone ? 'This browser doesn’t support notifications.' : 'On iPhone, add this app to your Home Screen first, then open it from there to turn on reminders.';
   else if (push === 'on') pushLine = 'Reminders are on for this device.';
   else if (typeof Notification !== 'undefined' && Notification.permission === 'denied') pushLine = 'Notifications are blocked. Allow them in your phone’s settings for this app.';
   else pushLine = 'Reminders are off on this device.';
 
-  const exams = [...s.settings.exams].sort((a, b) => a.moed.localeCompare(b.moed) || a.date.localeCompare(b.date));
+  const reps = s.plan.repeats || [];
   return headerHTML('Settings', '') + `
     <section class="card"><h2>Reminders</h2>
       <p class="small">${esc(pushLine)}</p>
       <div class="row">
         ${push === 'on'
           ? '<button type="button" class="btn" data-act="push-test">Send a test</button><button type="button" class="btn ghost" data-act="push-off">Turn off on this device</button>'
-          : `<button type="button" class="btn primary" data-act="push-on"${!s.vapidPublic || !('PushManager' in window) ? ' disabled' : ''}>Turn on reminders</button>`}
+          : `<button type="button" class="btn primary" data-act="push-on"${DEMO || !s.vapidPublic || !('PushManager' in window) ? ' disabled' : ''}>Turn on reminders</button>`}
       </div>
       ${ui.msgs.push ? `<p class="msg">${esc(ui.msgs.push)}</p>` : ''}
       <div class="row">${timeField('r-morning', 'Morning summary', r.morning)}${timeField('r-evening', 'Evening nudge', r.evening)}</div>
       <div class="row">${timeField('r-weekendMorning', 'Fri–Sat morning', r.weekendMorning)}${timeField('r-weekendEvening', 'Fri–Sat nudge', r.weekendEvening)}</div>
       <label class="toggle"><input type="checkbox" id="r-off" data-act="reminders-off"${r.off ? ' checked' : ''}> Pause all reminders</label>
-      <p class="small muted">Israel time, in 15-minute steps. The evening nudge only comes if targets are still open. The morning summary includes anything behind and close deadlines.</p>
+      <p class="small muted">Israel time, in 15-minute steps. The morning summary lists what’s on today, anything behind, and goals with no day. The evening nudge only comes if something is still open. On Saturday both tell you if next week isn’t planned.</p>
     </section>
-    <section class="card"><h2>Semester</h2>
-      <label class="field" style="max-width:220px"><span>Last day of classes</span><input type="date" id="s-end" data-act="semester-end" value="${esc(s.settings.semesterEnd)}"></label>
-      <p class="small muted">The day after, the Week screen switches to exam prep. Check this date in the Technion calendar.</p>
+    <section class="card"><div class="card-head"><h2>Repeating goals</h2><span class="small muted">${reps.length}</span></div>
+      ${reps.length ? `<ul class="list">${reps.map((x) => `<li style="align-items:center"><div class="grow t">${sw(x.course)}<span>${esc(x.title)}</span></div>
+        ${ui.confirm === 'rep-' + x.id
+          ? `<button type="button" class="btn danger" data-act="repeat-stop" data-id="${esc(x.id)}">Stop repeating</button><button type="button" class="btn ghost" data-act="cancel-confirm">Keep</button>`
+          : `<button type="button" class="btn ghost" data-act="confirm" data-key="rep-${esc(x.id)}">Stop</button>`}</li>`).join('')}</ul>` : '<p class="small muted">None. Tick “Every week” when you add a goal on the Plan screen.</p>'}
+      <p class="small muted">These show up as goals every week, ready to put on days. Stopping one keeps the goals already in this week and next.</p>
     </section>
-    <section class="card"><h2>Exams</h2>
-      <ul class="list">${exams.map((e) => `<li style="align-items:center">
-        <label class="toggle grow">${'<input type="checkbox" data-act="exam-taking" data-id="' + esc(e.id) + '"' + (e.taking ? ' checked' : '') + '>'}${sw(e.course)}<span>${esc(COURSES[e.course]?.short || e.course)} <span class="muted">· Moed ${esc(e.moed)}</span></span></label>
-        <input type="date" style="max-width:160px" id="ex-${esc(e.id)}" data-act="exam-date" data-id="${esc(e.id)}" value="${esc(e.date)}" aria-label="${esc(cname(e.course))} Moed ${esc(e.moed)} date">
-      </li>`).join('')}</ul>
-      <p class="small muted">Ticked exams appear in the countdown and drive exam prep. Tick a Moed B if you’ll take it.</p>
-    </section>
-    ${resetCardHTML()}
     <section class="card"><h2>This device</h2>
-      <div class="row"><button type="button" class="btn" data-act="sync-now">Sync now</button>${syncHTML()}</div>
+      ${DEMO ? `<p class="small">Preview: everything you do here stays in this browser.</p>
+        <div class="row">${ui.confirm === 'demo-reset'
+          ? '<button type="button" class="btn danger" data-act="demo-reset">Clear the preview</button><button type="button" class="btn ghost" data-act="cancel-confirm">Cancel</button>'
+          : '<button type="button" class="btn ghost" data-act="confirm" data-key="demo-reset">Start the preview over</button>'}</div>`
+      : `<div class="row"><button type="button" class="btn" data-act="sync-now">Sync now</button>${syncHTML()}</div>
       ${ui.msgs.sync && ui.sync !== 'ok' ? `<p class="msg err">${esc(ui.msgs.sync)}</p>` : ''}
       <div class="row">${ui.confirm === 'signout'
         ? '<button type="button" class="btn danger" data-act="signout">Sign out and clear this device</button><button type="button" class="btn ghost" data-act="cancel-confirm">Cancel</button>'
-        : '<button type="button" class="btn ghost" data-act="confirm" data-key="signout">Sign out</button>'}</div>
-      <p class="small muted">Version ${VERSION}. Your data lives in your Cloudflare database and syncs to every device with the app key.</p>
+        : '<button type="button" class="btn ghost" data-act="confirm" data-key="signout">Sign out</button>'}</div>`}
+      <p class="small muted">Version ${VERSION}.${DEMO ? '' : ' Your data lives in your Cloudflare database and syncs to every device with the app key.'}</p>
     </section>`;
-}
-
-function resetCardHTML() {
-  const s = store.state;
-  const picked = [...ui.pickDays].sort((a, b) => a - b);
-  const all = picked.length === 7;
-  const count = picked.reduce((a, d) => a + s.plan.days[d].items.length, 0);
-  const dayList = all ? 'every day' : picked.map((d) => DAY_NAMES[d]).join(', ').replace(/, ([^,]*)$/, ' and $1');
-  let actions;
-  if (ui.confirm === 'clear-days') {
-    actions = `<p class="small">Remove ${plural(count, 'target')} from ${esc(dayList)}? Classes stay. You’ll go straight to adding new ones.</p>
-      <div class="row"><button type="button" class="btn danger" data-act="clear-days">Clear targets</button><button type="button" class="btn ghost" data-act="cancel-confirm">Cancel</button></div>`;
-  } else if (ui.confirm === 'restore-days') {
-    actions = `<p class="small">Replace the targets on ${esc(dayList)} with the original plan’s targets?</p>
-      <div class="row"><button type="button" class="btn danger" data-act="restore-days">Restore originals</button><button type="button" class="btn ghost" data-act="cancel-confirm">Cancel</button></div>`;
-  } else {
-    actions = `<div class="row"><button type="button" class="btn" data-act="confirm-days" data-key="clear-days">Clear targets</button><button type="button" class="btn ghost" data-act="confirm-days" data-key="restore-days">Restore originals</button></div>`;
-  }
-  return `<section class="card"><h2>Reset targets</h2>
-    <p class="small muted">Pick days, then clear their targets to write new ones, or bring back the original targets. Classes and your ticks from past weeks stay.</p>
-    <div class="daypick" role="group" aria-label="Days to reset">
-      <button type="button" class="seg" data-act="pick-day" data-day="all" aria-pressed="${all}">All</button>
-      ${DAY_NAMES.map((n, i) => `<button type="button" class="seg" data-act="pick-day" data-day="${i}" aria-pressed="${picked.includes(i)}">${n.slice(0, 3)}</button>`).join('')}
-    </div>
-    ${actions}
-    ${ui.msgs.reset ? `<p class="msg err">${esc(ui.msgs.reset)}</p>` : ''}
-  </section>`;
 }
 
 // ---------- Setup ----------
@@ -744,7 +541,7 @@ async function connectWithKey(key, pendingFlow) {
   LS.set('sp-key', store.key);
   LS.del('sp-pending');
   ui.msgs.setup = null;
-  location.hash = '#week';
+  location.hash = '#today';
   await pull();
 }
 
@@ -791,8 +588,10 @@ async function pushTest() {
 
 // ---------- Main render ----------
 function render() {
+  // Never rebuild the screen under a finger: the tap or drag in progress would lose its target.
+  if (drag.active || press.hold || Date.now() - press.at < 4000) { ui.pendingRender = true; return; }
   const a = document.activeElement;
-  if (a && $app.contains(a) && (a.matches('input[type=text], input[type=password], input[type=number], textarea, select'))) {
+  if (a && $app.contains(a) && (a.matches('input[type=text], input[type=password], textarea, select'))) {
     ui.pendingRender = true; return;
   }
   ui.pendingRender = false;
@@ -806,182 +605,228 @@ function render() {
     $app.innerHTML = headerHTML('Study planner', '') + `<section class="card"><p>${navigator.onLine ? 'Loading your plan…' : 'Connect to the internet once to load your plan. After that it works offline.'}</p>${ui.msgs.sync ? `<p class="msg err">${esc(ui.msgs.sync)}</p>` : ''}</section>`;
     return;
   }
-  const views = { week: viewWeek, deadlines: viewDeadlines, stats: viewStats, settings: viewSettings, setup: viewSetup };
-  $app.innerHTML = (views[view] || viewWeek)();
+  const views = { today: viewToday, plan: viewPlan, settings: viewSettings, setup: viewSetup };
+  const sheetScroll = document.querySelector('.sheet')?.scrollTop || 0;
+  $app.innerHTML = (views[view] || viewToday)() + (view === 'setup' ? '' : sheetHTML());
+  document.body.classList.toggle('has-sheet', !!ui.sheet && view !== 'setup');
+  const sheet = document.querySelector('.sheet');
+  if (sheet) sheet.scrollTop = sheetScroll;
 }
 $app.addEventListener('focusout', () => setTimeout(() => { if (ui.pendingRender) render(); }, 0));
 
+// Keeps the goal sheet above the on-screen keyboard.
+if (window.visualViewport) {
+  const vv = window.visualViewport;
+  const lift = () => document.documentElement.style.setProperty('--kb', `${Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop))}px`);
+  vv.addEventListener('resize', lift); vv.addEventListener('scroll', lift);
+}
+
+// A press in progress. Screen updates wait until it's over (see render).
+const press = { at: 0, hold: false };
+const pressEnd = () => { press.at = 0; setTimeout(() => { if (ui.pendingRender) render(); }, 0); };
+// A field saves when focus leaves it, which on a tap happens just before the click lands.
+// Holding the update until the end of that tap keeps the button under the finger alive.
+const holdRender = () => { press.hold = true; setTimeout(() => { press.hold = false; if (ui.pendingRender) render(); }, 0); };
+document.addEventListener('pointerdown', () => { press.at = Date.now(); }, true);
+document.addEventListener('pointerup', pressEnd, true);
+document.addEventListener('pointercancel', pressEnd, true);
+
+// ---------- Drag and drop ----------
+// Works with a finger, a pen or a mouse. Touch: hold a goal for a moment, or grab its
+// grip to start right away. While dragging, a strip of days is pinned to the bottom.
+const drag = { pending: null, active: null, timer: 0, clickBlock: 0, raf: 0 };
+const HOLD_MS = 280;
+
+function cancelPending() { clearTimeout(drag.timer); drag.pending = null; }
+
+function startDrag(x, y) {
+  const p = drag.pending;
+  cancelPending();
+  if (!p || !p.src.isConnected || !store.state) return;
+  const title = p.src.querySelector('.t')?.innerHTML || '';
+  const ghost = document.createElement('div');
+  ghost.className = 'drag-ghost'; ghost.innerHTML = `<span class="t">${title}</span>`;
+  document.body.appendChild(ghost);
+  drag.active = { id: p.id, src: p.src, type: p.src.dataset.drag, item: p.src.dataset.id, ghost, touch: p.touch, x0: p.x, y0: p.y, x, y, armed: !p.touch || p.onGrip, target: null };
+  p.src.classList.add('drag-src');
+  document.body.classList.add('dragging', `drag-${drag.active.type}`);
+  try { navigator.vibrate?.(8); } catch {}
+  moveDrag(x, y);
+  drag.raf = requestAnimationFrame(autoScroll);
+}
+
+function dropTargetAt(x, y) {
+  const a = drag.active;
+  const el = document.elementFromPoint(x, y)?.closest('[data-drop]');
+  if (!el || !a.armed) return null;
+  if (el.dataset.drop === 'tray' && a.type !== 'part') return null;
+  return el;
+}
+
+function moveDrag(x, y) {
+  const a = drag.active;
+  a.x = x; a.y = y;
+  if (!a.armed && Math.hypot(x - a.x0, y - a.y0) > 12) a.armed = true;
+  const w = a.ghost.offsetWidth, h = a.ghost.offsetHeight;
+  const left = Math.min(Math.max(8, x - w / 2), window.innerWidth - w - 8);
+  const top = Math.max(8, y - h - (a.touch ? 28 : 14));
+  a.ghost.style.transform = `translate(${Math.round(left)}px, ${Math.round(top)}px)`;
+  const t = dropTargetAt(x, y);
+  if (t !== a.target) {
+    a.target?.classList.remove('drop-on');
+    t?.classList.add('drop-on');
+    a.target = t;
+  }
+}
+
+// Scrolls the page when the finger is near the top, or just above the strip of days.
+function autoScroll() {
+  const a = drag.active;
+  if (!a) return;
+  const dock = document.querySelector('.dock');
+  const bottom = dock ? dock.getBoundingClientRect().top : window.innerHeight;
+  let dy = 0;
+  if (a.armed && a.y < 90) dy = -Math.ceil((90 - a.y) / 6);
+  else if (a.armed && a.y < bottom && a.y > bottom - 70) dy = Math.ceil((a.y - (bottom - 70)) / 6);
+  if (dy) { window.scrollBy(0, dy); moveDrag(a.x, a.y); }
+  drag.raf = requestAnimationFrame(autoScroll);
+}
+
+function endDrag(apply) {
+  const a = drag.active;
+  if (!a) return;
+  cancelAnimationFrame(drag.raf);
+  drag.active = null;
+  a.ghost.remove();
+  a.src.classList.remove('drag-src');
+  a.target?.classList.remove('drop-on');
+  document.body.classList.remove('dragging', 'drag-goal', 'drag-part');
+  if (a.armed) drag.clickBlock = Date.now();
+  const t = apply ? a.target : null;
+  if (t) {
+    if (t.dataset.drop === 'day') (a.type === 'goal' ? placeGoal : movePart)(a.item, +t.dataset.day);
+    else if (a.type === 'part') removePart(a.item);
+  }
+  if (ui.pendingRender) render();
+}
+
+document.addEventListener('pointerdown', (e) => {
+  if (drag.active || drag.pending || e.button > 0 || !e.isPrimary) return;
+  const src = e.target.closest?.('[data-drag]');
+  if (!src || e.target.closest('input, select, textarea')) return;
+  const touch = e.pointerType !== 'mouse';
+  const onGrip = !!e.target.closest('.grip');
+  drag.pending = { src, id: e.pointerId, x: e.clientX, y: e.clientY, touch, onGrip };
+  if (touch && !onGrip) drag.timer = setTimeout(() => { if (drag.pending) startDrag(drag.pending.x, drag.pending.y); }, HOLD_MS);
+});
+document.addEventListener('pointermove', (e) => {
+  const p = drag.pending;
+  if (p && e.pointerId === p.id) {
+    const far = Math.hypot(e.clientX - p.x, e.clientY - p.y);
+    if (p.touch && !p.onGrip) { if (far > 10) cancelPending(); } // moved before the hold: it's a scroll
+    else if (far > 6) startDrag(e.clientX, e.clientY);
+    return;
+  }
+  if (drag.active && e.pointerId === drag.active.id) moveDrag(e.clientX, e.clientY);
+});
+document.addEventListener('pointerup', (e) => {
+  if (drag.pending && e.pointerId === drag.pending.id) cancelPending();
+  if (drag.active && e.pointerId === drag.active.id) endDrag(true);
+});
+document.addEventListener('pointercancel', (e) => {
+  if (drag.pending && e.pointerId === drag.pending.id) cancelPending();
+  if (drag.active && e.pointerId === drag.active.id) endDrag(false);
+});
+window.addEventListener('blur', () => { cancelPending(); endDrag(false); });
+// While a drag is on, the page must not scroll under the finger.
+document.addEventListener('touchmove', (e) => { if ((drag.active || drag.pending?.onGrip) && e.cancelable) e.preventDefault(); }, { passive: false });
+document.addEventListener('contextmenu', (e) => { if (e.target.closest?.('[data-drag]') && (drag.active || drag.pending)) e.preventDefault(); });
+// The tap that ends a drag isn't a click on whatever was under it.
+document.addEventListener('click', (e) => { if (Date.now() - drag.clickBlock < 350) { e.stopPropagation(); e.preventDefault(); } }, true);
+
 // ---------- Events ----------
-function readItemForm(box) {
-  const tasks = box.querySelector('#f-tasks').value.split('\n').map((x) => x.trim()).filter(Boolean);
-  const hwRaw = box.querySelector('#f-hw').value.trim();
-  const hw = hwRaw === '' ? null : Math.max(0, Math.min(100, Math.round(+hwRaw)));
-  return {
-    course: box.querySelector('#f-course').value,
-    when: box.querySelector('#f-when').value.trim(),
-    tasks, hw: Number.isFinite(hw) ? hw : null,
-    optional: box.querySelector('#f-opt').checked,
-  };
+function stopRepeat(p, repeatId, afterWeek) {
+  p.repeats = p.repeats.filter((r) => r.id !== repeatId);
+  // Later weeks that were filled in automatically and never touched go too.
+  if (afterWeek) p.goals = p.goals.filter((g) => !(g.repeatId === repeatId && g.week > afterWeek && !g.parts.length));
 }
 
 document.addEventListener('click', async (e) => {
   const el = e.target.closest('[data-act]');
-  if (!el || el.matches('input[type=checkbox], input[type=date], input[type=time], input[type=text]')) return;
+  if (!el || el.matches('input, select, textarea')) return;
+  // Buttons don't take focus on iPhone, so finish any field being edited first.
+  const a = document.activeElement;
   const act = el.dataset.act;
+  if (a && a !== document.body && a.matches('input[type=text], textarea, select') && act !== 'goal-add') a.blur();
   const s = store.state;
-  const { today } = clock();
+  const { dow, week } = clock();
 
   switch (act) {
-    case 'day': ui.day = +el.dataset.day; ui.editing = false; ui.editId = null; render(); break;
-    case 'start-edit': ui.editing = true; ui.editId = null; ui.confirm = null; render(); break;
-    case 'stop-edit': ui.editing = false; ui.editId = null; ui.confirm = null; render(); break;
-    case 'edit': ui.editId = el.dataset.id; ui.confirm = null; render(); break;
-    case 'cancel-edit': ui.editId = null; render(); break;
     case 'confirm': ui.confirm = el.dataset.key; render(); break;
     case 'cancel-confirm': ui.confirm = null; render(); break;
-    case 'toggle-week': ui.showWeek = !ui.showWeek; render(); break;
-    case 'toggle-hw': LS.set('sp-hw-open', !LS.get('sp-hw-open', true)); render(); break;
+    case 'which': ui.which = el.dataset.which; render(); break;
+    case 'plan-open':
+      ui.which = el.dataset.which;
+      if (ui.view === 'plan') render(); else location.hash = '#plan';
+      break;
 
-    case 'effort': {
-      const { week, item } = el.dataset; const v = +el.dataset.v;
-      const cur = s.ticks[week]?.[item];
-      commit({ type: 'tick', week, item, done: true, effort: cur?.effort === v ? null : v });
+    case 'open-goal': ui.sheet = { goalId: el.dataset.id }; ui.confirm = null; render(); break;
+    case 'sheet-close': ui.sheet = null; ui.confirm = null; render(); break;
+
+    case 'goal-add': addGoal(); break;
+    case 'goal-day': {
+      const g = findGoal(s.plan, el.dataset.id); if (!g) break;
+      const d = +el.dataset.day;
+      const part = g.parts.find((p) => p.day === d);
+      if (part) removePart(part.id, true); else placeGoal(g.id, d, true);
       break;
     }
-    case 'dismiss-leftovers': commit({ type: 'tick', week: el.dataset.week, item: '__dismissed', done: true, effort: null }); break;
-
-    case 'save-item': {
-      const box = el.closest('[data-form=item]');
-      const data = readItemForm(box);
-      if (!data.tasks.length) { const m = box.querySelector('#f-err'); m.textContent = 'Write at least one thing to do.'; m.hidden = false; return; }
-      const id = box.dataset.id;
-      const day = ui.day;
-      document.activeElement?.blur();
-      commitPlan((p) => {
-        if (id === 'new') p.days[day].items.push({ id: uid(), ...data });
-        else Object.assign(p.days[day].items.find((x) => x.id === id), data);
-      });
-      ui.editId = null; render(); toast(id === 'new' ? 'Target added' : 'Target saved');
+    case 'part-today': movePart(el.dataset.id, dow); break;
+    case 'usual': {
+      const w = planWeek();
+      const todo = weekGoals(s.plan, w).filter((g) => !g.parts.length && !goalDone(s.ticks[w], g) && usualDays(s.plan, g).length).map((g) => [g.id, usualDays(s.plan, g)]);
+      const now = Date.now();
+      commitPlan((p) => { for (const [id, days] of todo) findGoal(p, id).parts = days.map((d, i) => ({ id: uid() + i, day: d, note: '', at: now + i })); });
+      toast(`${plural(todo.length, 'goal')} placed. Drag to change.`);
       break;
     }
-    case 'del-item': { const id = el.dataset.id; const day = ui.day; ui.confirm = null; commitPlan((p) => { p.days[day].items = p.days[day].items.filter((x) => x.id !== id); }); toast('Target deleted'); break; }
-    case 'save-class': {
-      const box = el.closest('[data-form=class]');
-      const time = box.querySelector('#fc-time').value.trim();
-      const label = box.querySelector('#fc-label').value.trim();
-      const course = box.querySelector('#fc-course').value;
-      if (!/^\d{1,2}:\d{2}$/.test(time) || !label) { const m = box.querySelector('#fc-err'); m.textContent = 'Enter a time like 9:30 and a label.'; m.hidden = false; return; }
-      const day = ui.day;
-      document.activeElement?.blur();
-      commitPlan((p) => {
-        p.days[day].classes.push({ id: uid(), time, course, label });
-        p.days[day].classes.sort((a, b) => (+a.time.split(':')[0] * 60 + +a.time.split(':')[1]) - (+b.time.split(':')[0] * 60 + +b.time.split(':')[1]));
-      });
-      ui.editId = null; render();
+    case 'goal-whole': {
+      const g = findGoal(s.plan, el.dataset.id); if (!g) break;
+      const wt = s.ticks[g.week] || {};
+      if (goalDone(wt, g)) commit(tickOp(g.week, g.id, false), ...g.parts.filter((p) => wt[p.id]?.done).map((p) => tickOp(g.week, p.id, false)));
+      else { commit(tickOp(g.week, g.id, true)); toast(`${g.title}: done`); }
       break;
     }
-    case 'del-class': { const id = el.dataset.id; const day = ui.day; ui.confirm = null; commitPlan((p) => { p.days[day].classes = p.days[day].classes.filter((x) => x.id !== id); }); break; }
-
-    case 'add-deadline': {
-      const box = el.closest('[data-form=deadline]');
-      const title = box.querySelector('#d-title').value.trim();
-      const due = box.querySelector('#d-due').value;
-      const course = box.querySelector('#d-course').value;
-      const err = box.querySelector('#d-err');
-      if (!title || !due) { err.textContent = !title ? 'Give the deadline a name.' : 'Pick a due date.'; err.hidden = false; return; }
-      document.activeElement?.blur();
-      commit({ type: 'deadline', id: uid(), course, title, due, progress: 0, deleted: false });
-      toast('Deadline added');
-      break;
-    }
-    case 'progress': { const d = s.deadlines[el.dataset.id]; commit({ type: 'deadline', ...d, progress: +el.dataset.v }); break; }
-    case 'del-deadline': { const d = s.deadlines[el.dataset.id]; ui.confirm = null; commit({ type: 'deadline', ...d, deleted: true }); toast('Deadline deleted'); break; }
-
-    case 'goal-new': ui.goalForm = 'new'; ui.confirm = null; render(); document.getElementById('g-title')?.focus(); break;
-    case 'goal-mode': ui.goalEdit = !ui.goalEdit; ui.goalForm = null; ui.confirm = null; render(); break;
-    case 'goal-edit': ui.goalForm = el.dataset.id; ui.confirm = null; render(); break;
-    case 'goal-cancel': document.activeElement?.blur(); ui.goalForm = null; render(); break;
-    case 'goal-save': {
-      const box = el.closest('[data-form=goal]');
-      const title = box.querySelector('#g-title').value.trim();
-      if (!title) { const m = box.querySelector('#g-err'); m.textContent = 'Write what the goal is.'; m.hidden = false; return; }
-      const data = {
-        title, course: box.querySelector('#g-course').value,
-        target: Math.max(1, Math.min(99, Math.round(+box.querySelector('#g-target').value) || 1)),
-        recurring: box.querySelector('#g-rec').checked,
-      };
-      const id = box.dataset.id; const { week } = clock();
-      document.activeElement?.blur();
-      commitPlan((p) => {
-        p.goals ||= [];
-        if (id === 'new') p.goals.push({ id: uid(), ...data, startWeek: week, week, dropped: false });
-        else {
-          const g = p.goals.find((x) => x.id === id);
-          Object.assign(g, data);
-          if (!data.recurring) g.week = week; else g.startWeek = g.startWeek || week;
-        }
-      });
-      ui.goalForm = null; render(); toast(id === 'new' ? 'Goal added' : 'Goal saved');
+    case 'goal-skip': {
+      const id = el.dataset.id; ui.sheet = null; ui.confirm = null;
+      commitPlan((p) => { const g = findGoal(p, id); g.deleted = true; g.parts = []; });
+      toast('Skipped for this week');
       break;
     }
     case 'goal-delete': {
-      const id = el.dataset.id; ui.confirm = null;
-      commitPlan((p) => { p.goals = (p.goals || []).filter((x) => x.id !== id); });
+      const id = el.dataset.id; const g = findGoal(s.plan, id); if (!g) break;
+      ui.sheet = null; ui.confirm = null;
+      commitPlan((p) => {
+        if (repeatOf(p, g)) stopRepeat(p, g.repeatId, g.week);
+        p.goals = p.goals.filter((x) => x.id !== id);
+      });
       toast('Goal deleted');
       break;
     }
-    case 'goal-step': {
-      const g = activeGoals(s.plan, clock().week).find((x) => x.id === el.dataset.id); if (!g) break;
-      const { week } = clock();
-      const n = Math.max(0, goalCount(s.ticks[week], g) + +el.dataset.v);
-      commit({ type: 'tick', week, item: g.id, done: n, count: n, effort: null });
-      if (n === (g.target || 1) && +el.dataset.v > 0) toast('Goal done');
-      break;
-    }
     case 'goal-carry': {
-      const { week } = clock(); const prev = addDays(week, -7);
-      const g = s.plan.goals.find((x) => x.id === el.dataset.id);
-      const n = goalCount(s.ticks[prev], g);
-      commitPlan((p) => { p.goals.find((x) => x.id === g.id).week = week; });
-      if (n) commit({ type: 'tick', week, item: g.id, done: n, count: n, effort: null });
-      toast('Moved to this week');
+      const id = el.dataset.id;
+      commitPlan((p) => {
+        const g = findGoal(p, id);
+        if (g.repeatId) { g.title += ' (last week)'; delete g.repeatId; }
+        g.week = week; g.parts = [];
+      });
+      toast('Moved to this week. Put it on a day.');
       break;
     }
-    case 'goal-drop': commitPlan((p) => { p.goals.find((x) => x.id === el.dataset.id).dropped = true; }); toast('Goal dropped'); break;
-    case 'pick-day': {
-      const v = el.dataset.day;
-      if (v === 'all') ui.pickDays = ui.pickDays.length === 7 ? [] : [0, 1, 2, 3, 4, 5, 6];
-      else { const d = +v; ui.pickDays = ui.pickDays.includes(d) ? ui.pickDays.filter((x) => x !== d) : [...ui.pickDays, d]; }
-      ui.confirm = null; ui.msgs.reset = null; render();
-      break;
-    }
-    case 'confirm-days':
-      if (!ui.pickDays.length) { ui.msgs.reset = 'Pick at least one day first.'; render(); break; }
-      ui.msgs.reset = null; ui.confirm = el.dataset.key; render();
-      break;
-    case 'clear-days': {
-      const days = [...ui.pickDays].sort((a, b) => a - b);
-      ui.confirm = null; ui.pickDays = [];
-      commitPlan((p) => { for (const d of days) p.days[d].items = []; });
-      toast(days.length === 7 ? 'All targets cleared' : 'Targets cleared');
-      ui.pendingEdit = { day: days[0] };
-      location.hash = '#week';
-      break;
-    }
-    case 'restore-days': {
-      const days = [...ui.pickDays];
-      ui.confirm = null; ui.pickDays = [];
-      commitPlan((p) => { for (const d of days) p.days[d].items = structuredClone(DEFAULT_PLAN.days[d].items); });
-      toast('Original targets restored');
-      break;
-    }
-    case 'clear-day': {
-      const day = ui.day;
-      ui.confirm = null;
-      commitPlan((p) => { p.days[day].items = []; });
-      ui.editId = 'new'; render();
-      break;
-    }
+    case 'goal-drop': commitPlan((p) => { const g = findGoal(p, el.dataset.id); g.deleted = true; }); toast('Dropped'); break;
+    case 'repeat-stop': { const id = el.dataset.id; ui.confirm = null; commitPlan((p) => stopRepeat(p, id, null)); toast('Stopped repeating'); break; }
+
+    case 'demo-reset': LS.del(PRE + 'state'); store.state = null; ui.confirm = null; await pull(); toast('Preview cleared'); break;
     case 'sync-now': ui.msgs.sync = null; await pull(); toast(ui.sync === 'ok' ? 'Synced' : 'Couldn’t sync'); break;
     case 'signout':
       if (ui.push === 'on') await pushOff();
@@ -1025,64 +870,98 @@ document.addEventListener('change', (e) => {
   const s = store.state;
   if (act === 'tick') {
     const { week, item } = el.dataset;
-    const cur = s.ticks[week]?.[item];
-    commit({ type: 'tick', week, item, done: el.checked, effort: el.checked ? (cur?.effort ?? null) : null });
-    if (el.checked && week !== 'exam') {
-      const it = s.plan.days.flatMap((d) => d.items).find((x) => x.id === item);
-      if (it?.hw != null) bumpDeadline(it);
+    const g = findGoal(s.plan, el.dataset.goal);
+    const wt = s.ticks[week] || {};
+    const was = g && goalDone(wt, g);
+    const ops = [];
+    // The goal was marked done as a whole: unticking one day keeps the other days ticked.
+    if (g && !el.checked && wt[g.id]?.done) ops.push(tickOp(week, g.id, false), ...g.parts.filter((p) => p.id !== item).map((p) => tickOp(week, p.id, true)));
+    ops.push(tickOp(week, item, el.checked));
+    commit(...ops);
+    if (el.checked && g && !was && goalDone(store.state.ticks[week], g)) toast(g.parts.length > 1 ? `${g.title}: all ${g.parts.length} parts done` : `${g.title}: done`);
+  } else if (act === 'add-course') {
+    ui.addCourse = el.value;
+  } else if (act === 'add-repeat') {
+    ui.addRepeat = el.checked;
+  } else if (act === 'goal-title' || act === 'goal-course') {
+    const id = el.dataset.id; const g = findGoal(s.plan, id); if (!g) return;
+    const key = act === 'goal-title' ? 'title' : 'course';
+    const v = key === 'title' ? el.value.trim().slice(0, 120) : el.value;
+    if ((key === 'title' && !v) || v === g[key]) { el.value = g[key]; return; }
+    if (key === 'title') holdRender();
+    commitPlan((p) => {
+      const x = findGoal(p, id); x[key] = v;
+      const r = repeatOf(p, x);
+      if (r) { r[key] = v; for (const y of p.goals) if (y.repeatId === r.id && y.week > x.week) y[key] = v; }
+    });
+  } else if (act === 'part-note') {
+    const id = el.dataset.id; const v = el.value.trim().slice(0, 120);
+    if (findPart(s.plan, id)?.p.note === v) return;
+    holdRender();
+    commitPlan((p) => { const f = findPart(p, id); if (f) f.p.note = v; });
+  } else if (act === 'goal-repeat') {
+    const id = el.dataset.id; const g = findGoal(s.plan, id); if (!g) return;
+    if (el.checked) {
+      commitPlan((p) => {
+        const x = findGoal(p, id);
+        const r = { id: uid(), title: x.title, course: x.course, since: addDays(x.week, 7), usual: sortedParts(x).map((q) => q.day) };
+        p.repeats.push(r); x.repeatId = r.id;
+      });
+      toast('It comes back every week');
+    } else if (g.repeatId) {
+      commitPlan((p) => { stopRepeat(p, g.repeatId, g.week); delete findGoal(p, id).repeatId; });
+      toast('Stopped repeating');
     }
-  } else if (act === 'goal-check') {
-    const { week } = clock(); const n = el.checked ? 1 : 0;
-    commit({ type: 'tick', week, item: el.dataset.id, done: n, count: n, effort: null });
-  } else if (act === 'hours') {
-    const v = el.value.trim(); const day = ui.day;
-    commitPlan((p) => { p.days[day].hours = v; });
   } else if (act === 'reminder-time') {
     const [h, m] = el.value.split(':').map(Number);
     if (!Number.isFinite(h)) return;
     const q = Math.round(m / 15) * 15;
     const hh = (q === 60 ? h + 1 : h) % 24, mm = q % 60;
     const v = `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
-    commitSettings((st) => { st.reminders[el.dataset.key] = v; });
+    commitSettings((st) => { (st.reminders ||= { ...DEFAULT_SETTINGS.reminders })[el.dataset.key] = v; });
   } else if (act === 'reminders-off') {
-    commitSettings((st) => { st.reminders.off = el.checked; });
-  } else if (act === 'semester-end' && el.value) {
-    commitSettings((st) => { st.semesterEnd = el.value; });
-  } else if (act === 'exam-date' && el.value) {
-    commitSettings((st) => { st.exams.find((x) => x.id === el.dataset.id).date = el.value; });
-  } else if (act === 'exam-taking') {
-    commitSettings((st) => { st.exams.find((x) => x.id === el.dataset.id).taking = el.checked; });
+    commitSettings((st) => { (st.reminders ||= { ...DEFAULT_SETTINGS.reminders }).off = el.checked; });
   }
 });
 
+document.addEventListener('input', (e) => { if (e.target.id === 'g-title') ui.addTitle = e.target.value; });
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.isComposing && e.target.id === 'g-title') { e.preventDefault(); addGoal(); }
+  else if (e.key === 'Enter' && e.target.matches?.('.sheet input[type=text]')) e.target.blur();
+  else if (e.key === 'Escape' && ui.sheet) { document.activeElement?.blur(); ui.sheet = null; ui.confirm = null; render(); }
+});
+
 function route() {
-  const v = location.hash.replace('#', '');
-  ui.view = ['week', 'deadlines', 'stats', 'settings', 'setup'].includes(v) ? v : 'week';
-  ui.confirm = null; ui.editId = null;
-  if (ui.view !== 'week') ui.editing = false;
-  if (ui.view === 'week' && ui.pendingEdit) {
-    ui.day = ui.pendingEdit.day; ui.editing = true; ui.editId = 'new'; ui.pendingEdit = null;
-  }
-  if (ui.view === 'settings') refreshPushState().then(render);
+  const v = location.hash.replace('#', '').replace('options', 'settings');
+  ui.view = ['today', 'plan', 'settings', 'setup'].includes(v) ? v : 'today';
+  ui.confirm = null; ui.sheet = null;
+  if (ui.view === 'settings' && !DEMO) refreshPushState().then(render);
   render();
   scrollTo(0, 0);
 }
+
+// A new day (or a new week) started while the app was open.
+function newDay() {
+  const { today } = clock();
+  if (ui.lastDate === today) return false;
+  ui.lastDate = today; ui.which = null;
+  if (store.state) { prepare(store.state); save(); }
+  return true;
+}
+
 window.addEventListener('hashchange', route);
 window.addEventListener('online', () => pull());
 window.addEventListener('offline', () => setSync('offline'));
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
-  const { today, dow } = clock();
-  if (ui.lastDate !== today) { ui.lastDate = today; ui.day = dow; }
+  newDay();
   pull();
 });
-setInterval(() => {
-  const { today, dow } = clock();
-  if (ui.lastDate && ui.lastDate !== today) { ui.lastDate = today; ui.day = dow; render(); }
-}, 60000);
+setInterval(() => { if (newDay()) render(); }, 60000);
 
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+if (!DEMO && 'serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 ui.lastDate = clock().today;
+if (store.state) prepare(store.state);
 route();
-refreshPushState();
+if (!DEMO) refreshPushState();
 pull();

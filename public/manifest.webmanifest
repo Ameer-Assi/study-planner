@@ -1,7 +1,7 @@
 {
   "name": "Study Planner",
   "short_name": "Planner",
-  "description": "Weekly study targets, deadlines and exam countdown for the Winter 2026–27 semester.",
+  "description": "Weekly study goals, placed on the days you'll do them.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

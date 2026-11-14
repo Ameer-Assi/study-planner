@@ -35,356 +35,160 @@ export function fmtShortDate(date) {
   return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' });
 }
 
-// ---------- Default plan ----------
+// ---------- Courses ----------
 export const COURSES = {
-  sig: { name: 'Signals', short: 'Sig', track: true },
-  ds: { name: 'Data structures 1', short: 'DS1', track: true },
-  prob: { name: 'Probability', short: 'Prob', track: true },
-  ssd: { name: 'Solid state', short: 'SSD', track: true },
-  org: { name: 'Organization', short: 'Org', track: true },
-  qp: { name: 'Quantum', short: 'QP', track: true },
-  flex: { name: 'Catch-up', short: 'Flex', track: false },
-  any: { name: 'Get ahead', short: 'Extra', track: false },
+  sig: { name: 'Signals', short: 'Sig', words: ['signal', 'sig'] },
+  ds: { name: 'Data structures 1', short: 'DS1', words: ['data structure', 'ds1', 'ds'] },
+  prob: { name: 'Probability', short: 'Prob', words: ['probability', 'probabilty', 'prob', 'webwork'] },
+  ssd: { name: 'Solid state', short: 'SSD', words: ['solid state', 'solid', 'ssd'] },
+  org: { name: 'Organization', short: 'Org', words: ['organization', 'organisation', 'assembly', 'org'] },
+  qp: { name: 'Quantum', short: 'QP', words: ['quantum', 'qp'] },
 };
-export const TRACKED = Object.keys(COURSES).filter((k) => COURSES[k].track);
+export const TRACKED = Object.keys(COURSES);
 
-const REC = 'Watch the tutorial live, or the recording at 1.5x in the same slot';
-let n = 0;
-const it = (course, when, tasks, extra = {}) => ({ id: `t${++n}`, course, when, tasks, optional: false, hw: null, ...extra });
-const cl = (time, course, label) => ({ id: `c${++n}`, time, course, label });
+// Picks the course a goal's title is about ("Probability HW" -> prob), or '' for general.
+export function guessCourse(title) {
+  const t = ` ${String(title).toLowerCase().replace(/[^a-z0-9]+/g, ' ')} `;
+  for (const k of TRACKED) if (COURSES[k].words.some((w) => t.includes(` ${w} `) || (w.length > 4 && t.includes(w)))) return k;
+  return '';
+}
 
-const BASE_PLAN = {
-  days: [
-    { hours: '8:30–20:00',
-      classes: [cl('9:30', 'ds', 'DS1 lecture'), cl('12:30', 'ds', 'DS1 tutorial'), cl('13:30', 'qp', 'Quantum tutorial'), cl('15:30', 'org', 'Organization tutorial'), cl('16:30', 'sig', 'Signals lecture')],
-      items: [
-        it('any', '6:30', ['Read the DS1 slides before the 9:30 lecture'], { optional: true }),
-        it('qp', 'before 9:30', ['Review Monday and Wednesday lectures: key equations and what they mean physically']),
-        it('ds', '12:30 slot', [REC]),
-        it('ds', '14:30 gap', ['Write each new structure’s invariants, operations and complexities', 'Re-solve the tutorial examples']),
-        it('org', '15:30 slot', [REC]),
-        it('ssd', 'evening', ['Reread Tuesday and Wednesday notes', 'Update the formula sheet']),
-      ] },
-    { hours: '8:30–20:00',
-      classes: [cl('12:30', 'qp', 'Quantum lecture'), cl('14:30', 'prob', 'Probability lecture'), cl('16:30', 'sig', 'Signals lecture')],
-      items: [
-        it('any', '6:30', ['Push the Signals homework toward 50%'], { optional: true }),
-        it('sig', 'morning', ['Review Sunday’s lecture and update your transform table', 'Homework to 30%'], { hw: 30 }),
-        it('ds', 'morning', ['Homework to 50% (not submitted, still do it)'], { hw: 50 }),
-        it('prob', 'evening', ['Review today’s lecture', 'Add new formulas to the formula sheet']),
-      ] },
-    { hours: '8:30–20:00',
-      classes: [cl('8:30', 'org', 'Organization lecture'), cl('12:30', 'ssd', 'Solid state lecture'), cl('16:30', 'ssd', 'Solid state tutorial')],
-      items: [
-        it('any', '6:30', ['Review Monday’s Quantum lecture'], { optional: true }),
-        it('org', 'evening', ['Review this morning’s lecture', 'Write and run a small assembly program on the new topic', 'Homework to 40%'], { hw: 40 }),
-      ] },
-    { hours: '8:30–20:00',
-      classes: [cl('9:30', 'ssd', 'Solid state session'), cl('10:30', 'prob', 'Probability tutorial'), cl('11:30', 'qp', 'Quantum lecture'), cl('15:30', 'prob', 'Probability lecture'), cl('16:30', 'sig', 'Signals tutorial')],
-      items: [
-        it('any', '6:30', ['Practice convolution until it’s automatic'], { optional: true }),
-        it('sig', 'before 9:30', ['Homework to 60%, before today’s tutorial'], { hw: 60 }),
-        it('prob', '10:30 slot', [REC]),
-        it('prob', '12:30–15:30 gap', ['Re-solve the tutorial examples', 'Homework to 40%'], { hw: 40 }),
-        it('sig', 'evening', ['Go over today’s tutorial and list what’s left in the homework']),
-      ] },
-    { hours: '8:30–20:00 · no classes',
-      classes: [],
-      items: [
-        it('any', '6:30', ['Clear your list of unsolved problems, or later in the semester start a past exam'], { optional: true }),
-        it('org', 'morning', ['Homework to 100%', 'Trace assembly code by hand: registers, stack, calls'], { hw: 100 }),
-        it('ssd', 'late morning', ['Review Tuesday’s lecture and Wednesday’s session', 'Solve the tutorial problems', 'Homework to 50%'], { hw: 50 }),
-        it('qp', 'early afternoon', ['Solve the tutorial problems', 'Homework to 60%'], { hw: 60 }),
-        it('sig', 'afternoon', ['Homework to 100%'], { hw: 100 }),
-        it('flex', 'late afternoon', ['Catch up on anything behind this week', 'Go through your list of unsolved problems', 'DS1 midterm week: all DS1']),
-      ] },
-    { hours: '6:15–10:00',
-      classes: [],
-      items: [
-        it('prob', 'first', ['Homework to 100%', 'Update the formula sheet'], { hw: 100 }),
-        it('ds', 'second', ['Homework to 100%', 'From mid-semester: a past exam instead'], { hw: 100 }),
-      ] },
-    { hours: '6:15–10:00',
-      classes: [],
-      items: [
-        it('qp', 'first', ['Homework to 100%', 'Quick review of the week’s lectures'], { hw: 100 }),
-        it('ssd', 'second', ['Homework to 100%', 'Anything behind from the week goes here first'], { hw: 100 }),
-      ] },
-  ],
-};
+// ---------- Plan ----------
+// The plan is goals-first (v2):
+//   plan.days[d]   hours and classes for each weekday (Sunday = 0). `items` stays empty;
+//                  it's only there so a phone still running the old app doesn't break.
+//   plan.repeats   goals that come back every week: { id, title, course, since, usual }
+//   plan.goals     one entry per goal per week: { id, title, course, week, repeatId?, parts, deleted? }
+//   goal.parts     the days a goal is placed on: { id, day, note, at }. Several parts = split.
+// Ticks are stored per week by id: a part's id, or the goal's id for "whole goal done".
+export const PLAN_VERSION = 2;
+export const V2_START = '2026-11-15'; // first week planned with goals
 
-// ---------- Plan updates ----------
-// Each update runs once on a saved plan. Items get fixed ids so ticks stay attached.
-// Existing targets are only reworded if their text is still the original.
-const review = (id, course) => ({
-  id, course, when: 'evening', optional: false, hw: null,
-  tasks: ['Review today’s lecture: key definitions and formulas in your own words', 'Write down anything you didn’t understand'],
-});
-const hw = (id, course, when, pct, tasks, extra = {}) => ({ id, course, when, tasks, optional: false, hw: pct, ...extra });
-const PLAN_UPDATES = [
-  {
-    id: 'lecture-review',
-    add: [
-      // [day, item, insert before this id (or null to append)]
-      [0, review('rev-sun-sig', 'sig'), 't11'],
-      [1, review('rev-mon-qp', 'qp'), 't18'],
-      [1, review('rev-mon-sig', 'sig'), null],
-      [2, review('rev-tue-ssd', 'ssd'), null],
-      [3, review('rev-wed-qp', 'qp'), 't33'],
-      [3, review('rev-wed-prob', 'prob'), 't33'],
-    ],
-    reword: [
-      ['t7', ['Review Monday and Wednesday lectures: key equations and what they mean physically'], ['Reread your Quantum notes from Monday and Wednesday before today’s tutorial']],
-      ['t16', ['Review Sunday’s lecture and update your transform table', 'Homework to 30%'], ['Update your transform table', 'Homework to 30%']],
-      ['t22', ['Review Monday’s Quantum lecture'], ['Get ahead on the Organization homework']],
-      ['t36', ['Review Tuesday’s lecture and Wednesday’s session', 'Solve the tutorial problems', 'Homework to 50%'], ['Go over Wednesday’s session', 'Solve the tutorial problems', 'Homework to 50%']],
-    ],
-  },
-  {
-    // Homework ladders rebuilt around each course's real rules (Nov 2026):
-    // Solid state, Signals and the Quantum dry sheet are due Thursday; Fri and Sat are short days.
-    id: 'homework-rules-2026-11',
-    since: '2026-11-15',
-    remove: ['t6', 't15', 't22', 't29', 't34', 't43'],
-    hours: [
-      // [day, values it may still have, new value]
-      [4, ['8:30–20:00 · no classes'], '9:00–20:00 · no classes'],
-      [5, ['6:15–10:00'], 'up to 2 hours'],
-      [6, ['6:15–10:00'], 'up to 3 hours'],
-    ],
-    put: [
-      // [day, item, insert before this id]. No third value: an existing item keeps its place.
-      [0, hw('t11', 'ssd', 'evening', 25, ['Reread Tuesday and Wednesday notes', 'Prep exercise as a warm-up, then homework to 25%', 'Update the formula sheet'])],
-      [1, hw('hw-mon-ww', 'prob', 'evening', 50, ['WeBWorK to 50%, when a sheet is open'], { optional: true, match: 'webwork' }), 'rev-mon-sig'],
-      [2, hw('hw-tue-qpm', 'qp', '10:30 gap', 100, ['Moodle exercise to 100%, when one is open (due Wednesday)'], { optional: true, match: 'moodle' }), 't23'],
-      [2, hw('hw-tue-qp', 'qp', '10:30 gap', 70, ['Dry sheet to 70%'], { match: 'dry' }), 't23'],
-      [2, hw('hw-tue-ssd', 'ssd', '14:30 gap', 50, ['Homework to 50%, before the tutorial']), 't23'],
-      [3, hw('t32', 'prob', '12:30–15:30 gap', 40, ['Re-solve the tutorial examples', 'Written sheet to 40%: sheets 2, 5, 7, 9 and 11 in full, the others selected questions'], { match: 'written' })],
-      [4, hw('t36', 'ssd', 'morning', 100, ['Go over Wednesday’s session', 'Homework to 100% and submit (due Thursday)']), 't35'],
-      [4, hw('t38', 'sig', 'late morning', 100, ['Homework to 100% and submit with your partner (due Thursday)']), 't35'],
-      [4, hw('t37', 'qp', 'early afternoon', 100, ['Solve the tutorial problems', 'Dry sheet to 100% and submit (due Thursday)'], { match: 'dry' }), 't35'],
-      [4, hw('t35', 'org', 'afternoon', 100, ['Homework to 100%', 'Trace assembly code by hand: registers, stack, calls'])],
-      [5, hw('t40', 'prob', 'first', 100, ['Written sheet to 100%, and submit if it’s sheet 2, 5, 7, 9 or 11', 'Update the formula sheet'], { match: 'written' })],
-      [5, hw('hw-fri-ww', 'prob', 'second', 100, ['WeBWorK to 100%, when a sheet is open (due Sunday)'], { optional: true, match: 'webwork' }), null],
-      [6, hw('t42', 'qp', 'first', 40, ['Start the new dry sheet: to 40%', 'Quick review of the week’s lectures'], { match: 'dry' })],
-      [6, hw('hw-sat-qpp', 'qp', 'second', 100, ['Prep assignment to 100%, when one is open (due Sunday)'], { optional: true, match: 'prep' }), null],
-      [6, hw('t41', 'ds', 'last', 100, ['Homework to 100% (not submitted, so drop this first on a short day)', 'From mid-semester: a past exam instead']), null],
-    ],
-  },
+const cl = (id, time, course, label) => ({ id, time, course, label });
+const day = (hours, classes) => ({ hours, classes, items: [] });
+const rep = (id, course, usual) => ({ id, title: `${COURSES[course].name} homework`, course, since: V2_START, usual });
+
+// Homework for each course comes back every week. `usual` is where the old fixed plan had it.
+const SEED_REPEATS = [
+  rep('r-sig', 'sig', [1, 3, 4]),
+  rep('r-ds', 'ds', [1, 6]),
+  rep('r-prob', 'prob', [3, 5]),
+  rep('r-ssd', 'ssd', [0, 2, 4]),
+  rep('r-org', 'org', [2, 4]),
+  rep('r-qp', 'qp', [2, 4]),
 ];
 
-// Insert or replace an item by id. Replacing keeps its ticks, since ticks are stored by id.
-function putItem(p, day, item, before, since) {
-  let found = null;
-  p.days.forEach((d, di) => d.items.forEach((x, xi) => { if (x.id === item.id) found = { di, xi }; }));
-  const next = structuredClone(item);
-  if (found && found.di === day && before === undefined) { p.days[day].items[found.xi] = next; return; }
-  if (found) p.days[found.di].items.splice(found.xi, 1);
-  else if (since && !next.optional) next.since = since; // new targets don't count against earlier weeks
-  const items = p.days[day].items;
-  const at = before ? items.findIndex((x) => x.id === before) : -1;
-  if (at >= 0) items.splice(at, 0, next); else items.push(next);
-}
+export const DEFAULT_PLAN = {
+  v: PLAN_VERSION,
+  days: [
+    day('8:30–20:00', [cl('c1', '9:30', 'ds', 'DS1 lecture'), cl('c2', '12:30', 'ds', 'DS1 tutorial'), cl('c3', '13:30', 'qp', 'Quantum tutorial'), cl('c4', '15:30', 'org', 'Organization tutorial'), cl('c5', '16:30', 'sig', 'Signals lecture')]),
+    day('8:30–20:00', [cl('c6', '12:30', 'qp', 'Quantum lecture'), cl('c7', '14:30', 'prob', 'Probability lecture'), cl('c8', '16:30', 'sig', 'Signals lecture')]),
+    day('8:30–20:00', [cl('c9', '8:30', 'org', 'Organization lecture'), cl('c10', '12:30', 'ssd', 'Solid state lecture'), cl('c11', '16:30', 'ssd', 'Solid state tutorial')]),
+    day('8:30–20:00', [cl('c12', '9:30', 'ssd', 'Solid state session'), cl('c13', '10:30', 'prob', 'Probability tutorial'), cl('c14', '11:30', 'qp', 'Quantum lecture'), cl('c15', '15:30', 'prob', 'Probability lecture'), cl('c16', '16:30', 'sig', 'Signals tutorial')]),
+    day('9:00–20:00 · no classes', []),
+    day('up to 2 hours', []),
+    day('up to 3 hours', []),
+  ],
+  repeats: SEED_REPEATS,
+  goals: [],
+};
 
+// Turns a plan saved by the old app (fixed targets on each day) into a goals-first plan.
+// Hours and classes are kept. Old "repeat every week" goals keep repeating, and old
+// one-off goals from the last week stay as goals. Runs the same on the phone and the server.
 export function migratePlan(plan) {
-  const p = structuredClone(plan);
-  p.updates ||= [];
-  let changed = false;
-  for (const u of PLAN_UPDATES) {
-    if (p.updates.includes(u.id)) continue;
-    const all = () => p.days.flatMap((d) => d.items);
-    for (const [day, item, before] of u.add || []) {
-      if (all().some((x) => x.id === item.id)) continue;
-      const items = p.days[day].items;
-      const at = before ? items.findIndex((x) => x.id === before) : -1;
-      if (at >= 0) items.splice(at, 0, structuredClone(item)); else items.push(structuredClone(item));
-    }
-    for (const [id, from, to] of u.reword || []) {
-      const it = all().find((x) => x.id === id);
-      if (it && JSON.stringify(it.tasks) === JSON.stringify(from)) it.tasks = [...to];
-    }
-    for (const d of p.days) d.items = d.items.filter((x) => !(u.remove || []).includes(x.id));
-    for (const [day, from, to] of u.hours || []) if (from.includes(p.days[day].hours)) p.days[day].hours = to;
-    for (const [day, item, before] of u.put || []) putItem(p, day, item, before, u.since);
-    p.updates.push(u.id);
-    changed = true;
+  if (plan?.v === PLAN_VERSION) return { plan, changed: false };
+  const p = {
+    v: PLAN_VERSION,
+    days: DEFAULT_PLAN.days.map((d, i) => ({
+      hours: plan?.days?.[i]?.hours ?? d.hours,
+      classes: structuredClone(plan?.days?.[i]?.classes ?? d.classes),
+      items: [],
+    })),
+    repeats: structuredClone(SEED_REPEATS),
+    goals: [],
+  };
+  for (const g of plan?.goals || []) {
+    if (g.dropped || !g.title) continue;
+    if (g.recurring) p.repeats.push({ id: g.id, title: g.title, course: g.course || '', since: V2_START, usual: [] });
+    else if (g.week >= addDays(V2_START, -7)) p.goals.push({ id: g.id, title: g.title, course: g.course || '', week: g.week, parts: [] });
   }
-  return { plan: p, changed };
+  return { plan: p, changed: true };
 }
-
-export const DEFAULT_PLAN = migratePlan(BASE_PLAN).plan;
 
 export const DEFAULT_SETTINGS = {
   reminders: { morning: '08:00', evening: '19:00', weekendMorning: '06:15', weekendEvening: '09:30' },
-  semesterEnd: '2027-01-22',
-  exams: [
-    { id: 'qpA', course: 'qp', moed: 'A', date: '2027-02-01', taking: true },
-    { id: 'dsA', course: 'ds', moed: 'A', date: '2027-02-07', taking: true },
-    { id: 'ssdA', course: 'ssd', moed: 'A', date: '2027-02-10', taking: true },
-    { id: 'probA', course: 'prob', moed: 'A', date: '2027-02-15', taking: true },
-    { id: 'sigA', course: 'sig', moed: 'A', date: '2027-02-21', taking: true },
-    { id: 'orgA', course: 'org', moed: 'A', date: '2027-02-25', taking: true },
-    { id: 'qpB', course: 'qp', moed: 'B', date: '2027-03-03', taking: false },
-    { id: 'ssdB', course: 'ssd', moed: 'B', date: '2027-03-07', taking: false },
-    { id: 'dsB', course: 'ds', moed: 'B', date: '2027-03-14', taking: false },
-    { id: 'probB', course: 'prob', moed: 'B', date: '2027-03-16', taking: false },
-    { id: 'sigB', course: 'sig', moed: 'B', date: '2027-03-18', taking: false },
-    { id: 'orgB', course: 'org', moed: 'B', date: '2027-03-21', taking: false },
-  ],
+  exams: [],
 };
 
-// ---------- Plan helpers ----------
-// Required targets. Given a week, targets added later than that week don't count for it.
-export const required = (items, week) => items.filter((i) => !i.optional && (!week || !i.since || i.since <= week));
+// ---------- Goals ----------
+const isDone = (wt, id) => !!wt?.[id]?.done;
+export const instanceId = (repeatId, week) => `${repeatId}@${week}`;
 
-// Unticked required targets from earlier days of this week.
-export function overdueItems(plan, weekTicks, dow, week) {
-  const out = [];
-  for (let d = 0; d < dow; d++) {
-    for (const item of required(plan.days[d].items, week)) {
-      if (!weekTicks?.[item.id]?.done) out.push({ day: d, item });
-    }
+// Makes sure every repeating goal has its entry for this week. Ids are fixed
+// (repeat + week), so the phone and the server always agree without saving anything.
+export function ensureWeek(plan, week) {
+  let changed = false;
+  for (const r of plan.repeats || []) {
+    if (r.since > week) continue;
+    const id = instanceId(r.id, week);
+    if (plan.goals.some((g) => g.id === id)) continue;
+    plan.goals.push({ id, title: r.title, course: r.course, week, repeatId: r.id, parts: [] });
+    changed = true;
   }
+  return changed;
+}
+
+export const weekGoals = (plan, week) => (plan.goals || []).filter((g) => g.week === week && !g.deleted);
+export const repeatOf = (plan, g) => (g.repeatId ? (plan.repeats || []).find((r) => r.id === g.repeatId) || null : null);
+export const sortedParts = (g) => [...g.parts].sort((a, b) => a.day - b.day);
+
+// A goal is done when it's marked done as a whole, or every day it's placed on is ticked.
+export const goalDone = (wt, g) => isDone(wt, g.id) || (g.parts.length > 0 && g.parts.every((p) => isDone(wt, p.id)));
+export const partDone = (wt, g, p) => isDone(wt, p.id) || isDone(wt, g.id);
+
+// Everything placed on one day, in the order it was put there.
+export function dayParts(plan, week, d) {
+  const out = [];
+  for (const goal of weekGoals(plan, week)) {
+    const parts = sortedParts(goal);
+    parts.forEach((part, i) => { if (part.day === d) out.push({ goal, part, n: i + 1, of: parts.length }); });
+  }
+  return out.sort((a, b) => (a.part.at || 0) - (b.part.at || 0));
+}
+
+// Unticked parts from earlier days of the week.
+export function lateParts(plan, wt, week, dow) {
+  const out = [];
+  for (let d = 0; d < dow; d++) for (const x of dayParts(plan, week, d)) if (!partDone(wt, x.goal, x.part)) out.push(x);
   return out;
 }
+export const openToday = (plan, wt, week, dow) => dayParts(plan, week, dow).filter((x) => !partDone(wt, x.goal, x.part));
 
-export function remainingToday(plan, weekTicks, dow, week) {
-  return required(plan.days[dow].items, week).filter((i) => !weekTicks?.[i.id]?.done);
+// Goals that aren't on any day yet.
+export const unplacedGoals = (plan, wt, week) => weekGoals(plan, week).filter((g) => !g.parts.length && !goalDone(wt, g));
+export const unfinishedGoals = (plan, wt, week) => weekGoals(plan, week).filter((g) => !goalDone(wt, g));
+
+// A week still needs planning when it has no goals at all, or goals not placed on a day.
+export function planningLeft(plan, wt, week) {
+  const goals = weekGoals(plan, week);
+  return { goals: goals.length, unplaced: unplacedGoals(plan, wt, week).length };
 }
 
-// ---------- Deadlines ----------
-export function deadlineStatus(dl, today) {
-  if (dl.progress >= 100) return 'done';
-  const left = daysBetween(today, dl.due);
-  if (left < 0) return 'late';
-  if (left <= 2) return 'soon';
-  return 'ok';
+// The days a repeating goal usually goes on: where it was last week, else its starting days.
+export function usualDays(plan, g) {
+  const r = repeatOf(plan, g);
+  if (!r) return [];
+  const prev = plan.goals.find((x) => x.id === instanceId(r.id, addDays(g.week, -7)) && !x.deleted);
+  const days = prev?.parts.length ? prev.parts.map((p) => p.day) : r.usual || [];
+  return [...new Set(days)].sort((a, b) => a - b);
 }
 
-// The deadline a ticked "Homework to N%" target moves. Courses with several kinds of
-// homework tag their targets with `match` (a word in the deadline's name, like "moodle"),
-// and only a deadline due within nine days counts, so a sheet two weeks away isn't touched.
-export function deadlineFor(deadlines, item, today) {
-  const open = deadlinesOf(deadlines, item)
-    .filter((d) => d.progress < 100 && daysBetween(today, d.due) >= -7 && (!item.match || daysBetween(today, d.due) <= 9))
-    .sort((a, b) => a.due.localeCompare(b.due));
-  return open[0] || null;
+// Goals older than this many weeks are dropped from the saved plan.
+export const KEEP_WEEKS = 6;
+export function pruneGoals(plan, week) {
+  const oldest = addDays(week, -7 * KEEP_WEEKS);
+  plan.goals = plan.goals.filter((g) => g.week >= oldest);
 }
 
-// Deadlines that belong to a target: same course, and the same kind when the target names one.
-export function deadlinesOf(deadlines, item) {
-  return deadlines.filter((d) => !d.deleted && d.course === item.course && (!item.match || d.title.toLowerCase().includes(item.match)));
-}
-
-// Optional targets tied to a kind of homework (Moodle, prep, WeBWorK) only apply
-// when an unfinished deadline of that kind falls within a week after the target's day.
-export function targetOpen(deadlines, item, date) {
-  if (!item.optional || !item.match) return true;
-  return deadlinesOf(deadlines, item).some((d) => { const n = daysBetween(date, d.due); return d.progress < 100 && n >= 0 && n <= 7; });
-}
-
-// The unfinished deadline that falls on a homework target's own day, if there is one.
-export function dueOn(deadlines, item, date) {
-  if (item.hw == null) return null;
-  return deadlinesOf(deadlines, item).find((d) => d.due === date && d.progress < 100) || null;
-}
-
-// ---------- Homework ladders ----------
-// One row per homework (course + kind), with its "Homework to N%" targets by day.
-const KINDS = { dry: 'dry', moodle: 'Moodle', prep: 'prep', written: 'written', webwork: 'WeBWorK' };
-export function homeworkLadders(plan) {
-  const rows = new Map();
-  plan.days.forEach((d, day) => d.items.forEach((item) => {
-    if (item.hw == null || !COURSES[item.course]?.track) return;
-    const key = `${item.course}:${item.match || ''}`;
-    if (!rows.has(key)) rows.set(key, { key, course: item.course, kind: item.match ? KINDS[item.match] || item.match : '', days: [[], [], [], [], [], [], []] });
-    rows.get(key).days[day].push(item);
-  }));
-  const optional = (r) => r.days.flat().every((i) => i.optional);
-  return [...rows.values()].sort((a, b) =>
-    TRACKED.indexOf(a.course) - TRACKED.indexOf(b.course) || optional(a) - optional(b) || a.days.findIndex((x) => x.length) - b.days.findIndex((x) => x.length));
-}
-
-// Due dates published by the courses. Each set is added once; deleting one in the app sticks.
-const dl = (id, course, title, due) => ({ id, course, title, due });
-export const DEADLINE_SEEDS = [
-  {
-    id: 'hw-2026-11',
-    items: [
-      dl('s-qp-m3', 'qp', 'Moodle 3: photoelectric effect', '2026-11-18'),
-      dl('s-qp-m4', 'qp', 'Moodle 4: de Broglie and Bragg', '2026-11-25'),
-      dl('s-qp-m5', 'qp', 'Moodle 5: Bohr model', '2026-12-02'),
-      dl('s-qp-p1', 'qp', 'Prep 1: Dirac notation', '2026-11-29'),
-      dl('s-qp-p2', 'qp', 'Prep 2: infinite well', '2026-12-20'),
-      dl('s-qp-p3', 'qp', 'Prep 3: harmonic oscillator', '2027-01-03'),
-      dl('s-qp-p4', 'qp', 'Prep 4: angular momentum', '2027-01-10'),
-      dl('s-qp-p5', 'qp', 'Prep 5: spin', '2027-01-17'),
-      dl('s-prob-ww1', 'prob', 'WeBWorK 1', '2026-11-22'),
-      dl('s-prob-ww2', 'prob', 'WeBWorK 2', '2026-11-29'),
-      dl('s-prob-ww3', 'prob', 'WeBWorK 3', '2026-12-06'),
-      dl('s-prob-w2', 'prob', 'Written HW 2', '2026-11-30'),
-      dl('s-prob-w5', 'prob', 'Written HW 5', '2026-12-16'),
-      dl('s-prob-w7', 'prob', 'Written HW 7', '2026-12-30'),
-      dl('s-prob-w9', 'prob', 'Written HW 9', '2027-01-14'),
-      dl('s-prob-w11', 'prob', 'Written HW 11', '2027-01-28'),
-      dl('s-org-hw1', 'org', 'HW1 wet: basic assembly', '2026-11-24'),
-    ],
-  },
-  {
-    // Progress reported on 14 Nov 2026. Only raises progress, never lowers it.
-    id: 'progress-2026-11-14',
-    progress: [['s-prob-ww1', 100], ['s-prob-ww2', 100], ['s-qp-m3', 100], ['s-org-hw1', 100]],
-  },
-];
-
-// ---------- Exams ----------
-export function takingExams(settings) {
-  return settings.exams.filter((e) => e.taking).sort((a, b) => a.date.localeCompare(b.date));
-}
-export function upcomingExams(settings, today) {
-  return takingExams(settings).filter((e) => e.date >= today);
-}
-export function inExamMode(settings, today) {
-  return today > settings.semesterEnd && upcomingExams(settings, today).length > 0;
-}
-
-// Prep plan for the next exam, built from the gap since the previous exam (or end of semester).
-export function examPrep(settings, today) {
-  const list = takingExams(settings);
-  const next = list.find((e) => e.date >= today);
-  if (!next) return null;
-  const prev = [...list].reverse().find((e) => e.date < next.date);
-  const start = addDays(prev && prev.date >= settings.semesterEnd ? prev.date : settings.semesterEnd, 1);
-  const end = addDays(next.date, -1);
-  const total = Math.max(1, daysBetween(start, end) + 1);
-  const index = Math.min(total - 1, Math.max(0, daysBetween(start, today)));
-  const daysLeft = daysBetween(today, next.date);
-  let phase, tasks;
-  if (daysLeft === 0) {
-    phase = 'Exam day';
-    tasks = ['Light look at the formula sheet only', 'Eat, arrive early, good luck'];
-  } else if (daysLeft === 1 || index >= total - 1) {
-    phase = 'Final day';
-    tasks = ['One full past exam in real exam conditions', 'Review every mistake and the formula sheet', 'Stop early and sleep well'];
-  } else if (index < Math.ceil(total * 0.4)) {
-    phase = 'Review';
-    tasks = ['Go topic by topic through your summary', 'Redo the key tutorial and homework problems', 'Build or finish the formula sheet'];
-  } else {
-    phase = 'Past exams';
-    tasks = ['Solve one past exam, timed', 'Check it and redo every mistake', 'Add what you missed to the formula sheet'];
-  }
-  return { exam: next, daysLeft, phase, tasks, start, total, index };
-}
-
-// ---------- Weekly goals ----------
-// Goals live in plan.goals. Recurring goals show every week from startWeek on;
-// one-off goals belong to a single week. Progress is a count stored in ticks.
-export const GOAL_SOFT_CAP = 5;
-export const GOAL_FLAG_DOW = 4; // unfinished goals are flagged from Thursday
-
-export function activeGoals(plan, week) {
-  return (plan.goals || []).filter((g) => !g.dropped && (g.recurring ? (g.startWeek || '') <= week : g.week === week));
-}
-export const goalCount = (weekTicks, g) => Math.max(0, +(weekTicks?.[g.id]?.done || 0));
-export const goalDone = (weekTicks, g) => goalCount(weekTicks, g) >= (g.target || 1);
-export const openGoals = (plan, weekTicks, week) => activeGoals(plan, week).filter((g) => !goalDone(weekTicks, g));
+export const partLabel = (x) => (x.part.note ? `${x.goal.title} (${x.part.note})` : x.goal.title);
