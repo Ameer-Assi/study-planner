@@ -59,12 +59,13 @@ export function guessCourse(title) {
 //                  it's only there so a phone still running the old app doesn't break.
 //   plan.repeats   goals that come back every week: { id, title, course, since, usual }
 //   plan.goals     one entry per goal per week: { id, title, course, week, repeatId?, parts, deleted? }
-//   goal.parts     the days a goal is placed on: { id, day, note, at }. Several parts = split.
+//   goal.parts     the days a goal is placed on: { id, day, note, at, start?, mins? }. Several parts = split.
+//   class          { id, time, course, label, mins }
 // Ticks are stored per week by id: a part's id, or the goal's id for "whole goal done".
 export const PLAN_VERSION = 2;
 export const V2_START = '2026-11-15'; // first week planned with goals
 
-const cl = (id, time, course, label) => ({ id, time, course, label });
+const cl = (id, time, course, label, mins = 60) => ({ id, time, course, label, mins });
 const day = (hours, classes) => ({ hours, classes, items: [] });
 const rep = (id, course, usual) => ({ id, title: `${COURSES[course].name} homework`, course, since: V2_START, usual });
 
@@ -81,10 +82,10 @@ const SEED_REPEATS = [
 export const DEFAULT_PLAN = {
   v: PLAN_VERSION,
   days: [
-    day('8:30–20:00', [cl('c1', '9:30', 'ds', 'DS1 lecture'), cl('c2', '12:30', 'ds', 'DS1 tutorial'), cl('c3', '13:30', 'qp', 'Quantum tutorial'), cl('c4', '15:30', 'org', 'Organization tutorial'), cl('c5', '16:30', 'sig', 'Signals lecture')]),
-    day('8:30–20:00', [cl('c6', '12:30', 'qp', 'Quantum lecture'), cl('c7', '14:30', 'prob', 'Probability lecture'), cl('c8', '16:30', 'sig', 'Signals lecture')]),
-    day('8:30–20:00', [cl('c9', '8:30', 'org', 'Organization lecture'), cl('c10', '12:30', 'ssd', 'Solid state lecture'), cl('c11', '16:30', 'ssd', 'Solid state tutorial')]),
-    day('8:30–20:00', [cl('c12', '9:30', 'ssd', 'Solid state session'), cl('c13', '10:30', 'prob', 'Probability tutorial'), cl('c14', '11:30', 'qp', 'Quantum lecture'), cl('c15', '15:30', 'prob', 'Probability lecture'), cl('c16', '16:30', 'sig', 'Signals tutorial')]),
+    day('8:30–20:00', [cl('c1', '9:30', 'ds', 'DS1 lecture', 120), cl('c2', '12:30', 'ds', 'DS1 tutorial'), cl('c3', '13:30', 'qp', 'Quantum tutorial'), cl('c4', '15:30', 'org', 'Organization tutorial'), cl('c5', '16:30', 'sig', 'Signals lecture', 120)]),
+    day('8:30–20:00', [cl('c6', '12:30', 'qp', 'Quantum lecture', 120), cl('c7', '14:30', 'prob', 'Probability lecture', 120), cl('c8', '16:30', 'sig', 'Signals lecture', 120)]),
+    day('8:30–20:00', [cl('c9', '8:30', 'org', 'Organization lecture', 120), cl('c10', '12:30', 'ssd', 'Solid state lecture', 180), cl('c11', '16:30', 'ssd', 'Solid state tutorial')]),
+    day('8:30–20:00', [cl('c12', '9:30', 'ssd', 'Solid state session'), cl('c13', '10:30', 'prob', 'Probability tutorial'), cl('c14', '11:30', 'qp', 'Quantum lecture'), cl('c15', '15:30', 'prob', 'Probability lecture'), cl('c16', '16:30', 'sig', 'Signals tutorial', 120)]),
     day('9:00–20:00 · no classes', []),
     day('up to 2 hours', []),
     day('up to 3 hours', []),
@@ -92,6 +93,25 @@ export const DEFAULT_PLAN = {
   repeats: SEED_REPEATS,
   goals: [],
 };
+
+// ---------- Times ----------
+// Times are minutes from midnight. The timetable shows 8:30 to 20:00, and grows when
+// something starts earlier or ends later.
+export const DAY_START = 510;
+export const DAY_END = 1200;
+export const toMin = (t) => { const [h, m] = String(t).split(':').map(Number); return h * 60 + m; };
+export const fmtMin = (m) => `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}`;
+export const fmtSpan = (a, b) => `${fmtMin(a)}–${fmtMin(b)}`;
+
+// How long a class takes. A class saved before lengths existed uses the timetable's
+// length if it's still at its original time, otherwise one hour.
+const SEED_MINS = Object.fromEntries(DEFAULT_PLAN.days.flatMap((d) => d.classes.map((c) => [`${c.id}@${c.time}`, c.mins])));
+export const classMins = (c) => (c.mins > 0 ? c.mins : SEED_MINS[`${c.id}@${c.time}`] || 60);
+
+// A goal's part can have a time of day: `start` (minutes from midnight) and `mins` (length).
+// Both are optional. A part with no start is on its day without a time.
+export const partMins = (p) => (p.mins > 0 ? p.mins : 60);
+export const hasTime = (p) => Number.isFinite(p.start);
 
 // Turns a plan saved by the old app (fixed targets on each day) into a goals-first plan.
 // Hours and classes are kept. Old "repeat every week" goals keep repeating, and old
@@ -182,6 +202,18 @@ export function usualDays(plan, g) {
   const prev = plan.goals.find((x) => x.id === instanceId(r.id, addDays(g.week, -7)) && !x.deleted);
   const days = prev?.parts.length ? prev.parts.map((p) => p.day) : r.usual || [];
   return [...new Set(days)].sort((a, b) => a - b);
+}
+
+// Where a repeating goal usually goes, with last week's times when it had them.
+export function usualSlots(plan, g) {
+  const r = repeatOf(plan, g);
+  if (!r) return [];
+  const prev = plan.goals.find((x) => x.id === instanceId(r.id, addDays(g.week, -7)) && !x.deleted);
+  const seen = new Set();
+  const slots = prev?.parts.length
+    ? sortedParts(prev).map((p) => ({ day: p.day, ...(hasTime(p) ? { start: p.start, mins: partMins(p) } : {}) }))
+    : (r.usual || []).map((day) => ({ day }));
+  return slots.filter((x) => !seen.has(x.day) && seen.add(x.day)).sort((a, b) => a.day - b.day);
 }
 
 // Goals older than this many weeks are dropped from the saved plan.

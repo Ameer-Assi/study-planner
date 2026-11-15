@@ -1,10 +1,11 @@
 import {
   COURSES, TRACKED, DAY_NAMES, DEFAULT_PLAN, DEFAULT_SETTINGS, nowLocal, addDays, weekOf, fmtShortDate, guessCourse,
   migratePlan, ensureWeek, pruneGoals, weekGoals, repeatOf, sortedParts, goalDone, partDone, dayParts, lateParts,
-  unplacedGoals, planningLeft, usualDays,
+  unplacedGoals, planningLeft, usualDays, usualSlots,
+  DAY_START, DAY_END, toMin, fmtMin, fmtSpan, classMins, partMins, hasTime,
 } from './shared.js';
 
-const VERSION = '2.2.0';
+const VERSION = '2.3.0';
 // Preview mode: runs without a server and keeps everything on this device.
 const DEMO = !!globalThis.PLANNER_DEMO;
 const PRE = DEMO ? 'spd-' : 'sp-';
@@ -24,6 +25,8 @@ const ui = {
   view: 'today', which: null, sheet: null, confirm: null,
   addTitle: '', addCourse: 'auto', addRepeat: false,
   schedDay: null, classForm: null, scrollTarget: null,
+  // Today shows a list or a timeline; Plan shows day cards or a week grid. Remembered per device.
+  todayView: LS.get('sp-today-view', 'list'), planView: LS.get('sp-plan-view', 'list'), planDay: null, goalsOpen: false,
   sync: DEMO ? 'demo' : 'idle', push: null, msgs: {}, pendingRender: false, lastDate: null,
 };
 const save = () => { LS.set(PRE + 'state', store.state); if (!DEMO) LS.set('sp-outbox', store.outbox); };
@@ -38,10 +41,18 @@ const uid = () => 'u' + Date.now().toString(36) + Math.random().toString(36).sli
 const clock = () => { const L = nowLocal(); return { today: L.date, dow: L.dow, week: weekOf(L.date), hm: L.hm }; };
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 const short = (d) => DAY_NAMES[d].slice(0, 3);
+const lenLabel = (m) => (m < 60 ? `${m} min` : m % 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m / 60} h`);
+const lenOptions = (cur, list) => [...new Set([...list, cur])].sort((a, b) => a - b).map((m) => `<option value="${m}"${m === cur ? ' selected' : ''}>${lenLabel(m)}</option>`).join('');
+const PART_LENS = [15, 30, 45, 60, 75, 90, 105, 120, 150, 180, 240];
+const CLASS_LENS = [30, 45, 60, 90, 120, 150, 180, 210, 240];
 const andList = (a) => (a.length < 2 ? a.join('') : `${a.slice(0, -1).join(', ')} and ${a[a.length - 1]}`);
 const ICON_WARN = '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 2.5 20h19L12 3.5Z"/><path d="M12 10v4.5M12 17.5v.01"/></svg>';
 const ICON_FLAG = '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 21V4M5 4h11l-2 4 2 4H5"/></svg>';
 const ICON_REPEAT = '<svg class="ico rep" viewBox="0 0 24 24" role="img" aria-label="Repeats every week"><path d="M4 11V9.5A3.5 3.5 0 0 1 7.5 6H19M16 3l3 3-3 3M20 13v1.5a3.5 3.5 0 0 1-3.5 3.5H5M8 21l-3-3 3-3"/></svg>';
+const ICON_LIST = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M5 12h14M5 17h14"/></svg>';
+const ICON_GRID = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2.5"/><path d="M4 10h16M10 4v16"/></svg>';
+const ICON_DOWN = '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>';
+const ICON_TICK = '<svg class="ck" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 6.5 5 9.5 10 3"/></svg>';
 const GRIP = '<span class="grip" aria-hidden="true"><svg viewBox="0 0 12 20"><circle cx="3" cy="4" r="1.5"/><circle cx="9" cy="4" r="1.5"/><circle cx="3" cy="10" r="1.5"/><circle cx="9" cy="10" r="1.5"/><circle cx="3" cy="16" r="1.5"/><circle cx="9" cy="16" r="1.5"/></svg></span>';
 
 function b64u(buf) {
@@ -229,6 +240,29 @@ function removePart(partId, quiet) {
   if (!quiet) toast(`Taken off ${DAY_NAMES[f.p.day]}`);
 }
 
+// Gives a part a time of day (or takes it away with start = null), moving it to day `d` if needed.
+function setPartTime(partId, d, start) {
+  const f = findPart(store.state.plan, partId);
+  if (!f) return;
+  if (f.p.day !== d && f.g.parts.some((p) => p.day === d)) { toast(`${f.g.title} is already on ${DAY_NAMES[d]}`); return; }
+  if (f.p.day === d && (hasTime(f.p) ? f.p.start : null) === start) return;
+  commitPlan((p) => {
+    const x = findPart(p, partId).p;
+    if (x.day !== d) { x.day = d; x.at = Date.now(); }
+    if (start == null) delete x.start; else x.start = start;
+  });
+  toast(start == null ? `${f.g.title}: no time` : `${f.g.title}: ${short(d)} ${fmtSpan(start, start + partMins(f.p))}`);
+}
+// A goal dropped straight onto an hour: it goes on that day at that time.
+function placeGoalAt(goalId, d, start) {
+  const g = findGoal(store.state.plan, goalId);
+  if (!g) return;
+  const there = g.parts.find((p) => p.day === d);
+  if (there) { setPartTime(there.id, d, start); return; }
+  commitPlan((p) => { findGoal(p, goalId).parts.push({ id: uid(), day: d, note: '', at: Date.now(), start }); });
+  toast(`${g.title}: ${short(d)} ${fmtSpan(start, start + 60)}`);
+}
+
 function addGoal() {
   const input = document.getElementById('g-title');
   const title = (input?.value || '').trim();
@@ -275,7 +309,7 @@ function partHTML(x, week, opts = {}) {
   const { goal: g, part: p } = x;
   const wt = store.state.ticks[week] || {};
   const done = partDone(wt, g, p);
-  const tags = `${x.of > 1 ? `<span class="tag">part ${x.n} of ${x.of}</span>` : ''}${opts.late && !done ? `<span class="tag late">${opts.from != null ? esc(short(opts.from)) : 'late'}</span>` : ''}`;
+  const tags = `${hasTime(p) ? `<span class="tag time">${fmtSpan(p.start, p.start + partMins(p))}</span>` : ''}${x.of > 1 ? `<span class="tag">part ${x.n} of ${x.of}</span>` : ''}${opts.late && !done ? `<span class="tag late">${opts.from != null ? esc(short(opts.from)) : 'late'}</span>` : ''}`;
   return `<li class="part${done ? ' done' : ''}"${opts.drag ? ` data-drag="part" data-id="${esc(p.id)}"` : ''}>
     ${opts.drag ? GRIP : ''}
     <input type="checkbox" class="check" id="chk-${esc(p.id)}" data-act="tick" data-week="${esc(week)}" data-item="${esc(p.id)}" data-goal="${esc(g.id)}"${done ? ' checked' : ''} aria-label="${esc(g.title)}${p.note ? ', ' + esc(p.note) : ''}">
@@ -325,6 +359,9 @@ function viewToday() {
   const wt = s.ticks[week] || {};
   const goals = weekGoals(s.plan, week);
   let h = headerHTML(DAY_NAMES[dow], fmtShortDate(today));
+  h += `<div class="switch" role="tablist" aria-label="View">
+    <button type="button" role="tab" aria-selected="${ui.todayView !== 'time'}" data-act="today-view" data-v="list">List</button>
+    <button type="button" role="tab" aria-selected="${ui.todayView === 'time'}" data-act="today-view" data-v="time">Timeline</button></div>`;
   if (ui.sync === 'auth') h += `<section class="card alert bad"><h2>${ICON_WARN}App key rejected</h2><p class="small">The server didn’t accept this device’s key. Check APP_KEY in Cloudflare, or sign out in Settings and enter it again.</p></section>`;
 
   if (dow === 6) {
@@ -355,11 +392,12 @@ function viewToday() {
   const parts = dayParts(s.plan, week, dow);
   const done = parts.filter((x) => partDone(wt, x.goal, x.part)).length;
   const d = s.plan.days[dow];
-  h += `<section class="card" data-drop="day" data-day="${dow}"><div class="card-head"><h2>Today</h2><span class="mono small muted">${parts.length ? `${done}/${parts.length}` : esc(d.hours)}</span></div>
+  if (ui.todayView === 'time') h += dayTimelineHTML(week, dow, 'Today');
+  else h += `<section class="card" data-drop="day" data-day="${dow}"><div class="card-head"><h2>Today</h2><span class="mono small muted">${parts.length ? `${done}/${parts.length}` : esc(d.hours)}</span></div>
     ${parts.length ? `<ul class="parts">${parts.map((x) => partHTML(x, week, { drag: parts.length > 1 })).join('')}</ul>`
       : `<p class="small muted">${goals.length ? 'Nothing is placed on today.' : 'No goals for this week yet.'}</p>
          <div class="row"><button type="button" class="btn" data-act="plan-open" data-which="this">${goals.length ? 'Open the plan' : 'Plan this week'}</button></div>`}
-    ${d.classes.length ? `<div class="row between"><p class="label">Classes</p><button type="button" class="btn ghost" data-act="edit-classes">Edit</button></div><ul class="classes">${d.classes.map((c) => `<li><span class="ct">${esc(c.time)}</span>${sw(c.course)}<span>${esc(c.label)}</span></li>`).join('')}</ul>` : ''}
+    ${d.classes.length ? `<div class="row between"><p class="label">Classes</p><button type="button" class="btn ghost" data-act="edit-classes">Edit</button></div><ul class="classes">${d.classes.map((c) => `<li><span class="ct">${esc(classSpan(c))}</span>${sw(c.course)}<span>${esc(c.label)}</span></li>`).join('')}</ul>` : ''}
   </section>`;
 
   if (goals.length) {
@@ -380,16 +418,20 @@ function viewPlan() {
   const usual = goals.filter((g) => !g.parts.length && !goalDone(wt, g) && usualDays(s.plan, g).length);
   const loose = unplacedGoals(s.plan, wt, w).length;
 
+  const grid = ui.planView === 'grid';
   let h = headerHTML('Plan', weekRange(w));
-  h += `<div class="switch" role="tablist" aria-label="Week">
+  h += `<div class="row viewrow"><div class="switch" role="tablist" aria-label="Week">
     <button type="button" role="tab" aria-selected="${which === 'this'}" data-act="which" data-which="this">This week</button>
-    <button type="button" role="tab" aria-selected="${which === 'next'}" data-act="which" data-which="next">Next week</button></div>`;
+    <button type="button" role="tab" aria-selected="${which === 'next'}" data-act="which" data-which="next">Next week</button></div>
+    <div class="switch icons" role="group" aria-label="View">
+    <button type="button" aria-pressed="${!grid}" aria-label="Day cards" data-act="plan-view" data-v="list">${ICON_LIST}</button>
+    <button type="button" aria-pressed="${grid}" aria-label="Week grid" data-act="plan-view" data-v="grid">${ICON_GRID}</button></div></div>`;
   if (which === 'this') h += leftoversHTML();
 
-  h += `<section class="card tray" data-drop="tray">
+  const tray = `<section class="card tray" data-drop="tray">
     <div class="card-head"><h2>Goals</h2><span class="small ${loose ? 'warn-text' : 'muted'}">${goals.length ? (loose ? `${loose} without a day` : 'all on a day') : ''}</span></div>
     ${goals.length ? `<ul class="goals">${goals.map((g) => goalHTML(g, w, { drag: true })).join('')}</ul>
-      <p class="small muted">Hold a goal and drag it to a day. Drag it again to split it over more days. Inside a day, drag items up or down to set their order.</p>`
+      <p class="small muted">${grid ? 'Hold a goal and drag it onto an hour in the grid, or onto a day in the strip at the bottom.' : 'Hold a goal and drag it to a day. Drag it again to split it over more days. Inside a day, drag items up or down to set their order.'}</p>`
       : '<p class="small muted">Write what you want done this week, like “Probability HW”. Then put each goal on one or more days.</p>'}
     ${usual.length ? `<div class="row"><button type="button" class="btn" data-act="usual">Put ${usual.length === 1 ? 'the repeating goal' : `${usual.length} repeating goals`} on ${usual.length === 1 ? 'its' : 'their'} usual days</button></div>` : ''}
     <div class="addgoal">
@@ -404,18 +446,35 @@ function viewPlan() {
         <button type="button" class="btn primary" data-act="goal-add">Add</button>
       </div>
     </div>
+    ${grid ? '<div class="row end"><button type="button" class="btn ghost" data-act="goals-toggle">Hide goals</button></div>' : ''}
   </section>`;
 
-  h += s.plan.days.map((d, i) => {
-    const date = addDays(w, i);
-    const parts = dayParts(s.plan, w, i);
-    const isToday = date === today;
-    const past = which === 'this' && i < dow;
-    return `<section class="card day${isToday ? ' today' : ''}" data-drop="day" data-day="${i}" aria-label="${DAY_NAMES[i]}">
-      <div class="card-head"><h2>${DAY_NAMES[i]} <span class="mono small muted">${esc(fmtShortDate(date))}</span>${isToday ? ' <span class="tag now">today</span>' : ''}</h2><span class="small muted">${esc(d.hours)}</span></div>
-      ${parts.length ? `<ul class="parts">${parts.map((x) => partHTML(x, w, { drag: true, late: past })).join('')}</ul>` : '<p class="empty">Nothing here yet</p>'}
-    </section>`;
-  }).join('');
+  if (grid) {
+    // The week grid needs the room, so the goals fold into one line until asked for.
+    const untimed = goals.reduce((n, g) => n + g.parts.filter((p) => !hasTime(p) && !partDone(wt, g, p)).length, 0);
+    const status = !goals.length ? 'none yet' : loose ? `${loose} without a day` : untimed ? `${untimed} without a time` : 'all have a time';
+    h += ui.goalsOpen || !goals.length ? tray
+      : `<button type="button" class="card goalsbar" data-act="goals-toggle" aria-expanded="false"><span class="gb-t"><b>Goals</b><span class="small ${loose ? 'warn-text' : 'muted'}">${goals.length} this week · ${status}</span></span>${ICON_DOWN}</button>`;
+    if (ui.planDay != null) {
+      const d = ui.planDay;
+      h += `<div class="row between"><button type="button" class="btn" data-act="plan-day-back">‹ Week</button>
+        <div class="row tight"><button type="button" class="btn" data-act="plan-day" data-day="${(d + 6) % 7}" aria-label="Previous day"${d === 0 ? ' disabled' : ''}>‹</button>
+        <button type="button" class="btn" data-act="plan-day" data-day="${(d + 1) % 7}" aria-label="Next day"${d === 6 ? ' disabled' : ''}>›</button></div></div>`;
+      h += dayTimelineHTML(w, d, `${DAY_NAMES[d]} <span class="mono small muted">${esc(fmtShortDate(addDays(w, d)))}</span>${addDays(w, d) === today ? ' <span class="tag now">today</span>' : ''}`);
+    } else h += weekGridHTML(w);
+  } else {
+    h += tray;
+    h += s.plan.days.map((d, i) => {
+      const date = addDays(w, i);
+      const parts = dayParts(s.plan, w, i);
+      const isToday = date === today;
+      const past = which === 'this' && i < dow;
+      return `<section class="card day${isToday ? ' today' : ''}" data-drop="day" data-day="${i}" aria-label="${DAY_NAMES[i]}">
+        <div class="card-head"><h2>${DAY_NAMES[i]} <span class="mono small muted">${esc(fmtShortDate(date))}</span>${isToday ? ' <span class="tag now">today</span>' : ''}</h2><span class="small muted">${esc(d.hours)}</span></div>
+        ${parts.length ? `<ul class="parts">${parts.map((x) => partHTML(x, w, { drag: true, late: past })).join('')}</ul>` : '<p class="empty">Nothing here yet</p>'}
+      </section>`;
+    }).join('');
+  }
 
   // Shown only while dragging: a strip of days pinned to the bottom, so any day is one move away.
   h += `<div class="dock" aria-hidden="true">
@@ -425,6 +484,162 @@ function viewPlan() {
       return `<div class="dock-day${addDays(w, i) === today ? ' today' : ''}" data-drop="day" data-day="${i}"><b>${short(i)}</b><span>${n || ''}</span></div>`;
     }).join('')}</div></div>`;
   return h;
+}
+
+// ---------- Timetable ----------
+// Classes and the goal parts that have a time, drawn by the hour. One day (Today, or a day
+// opened from the week grid) or the whole week side by side.
+const SNAP = 15;                 // dragging and resizing move in quarter hours
+const PM_DAY = 56 / 60;          // pixels per minute in a day's timeline
+const PM_WEEK = 40 / 60;         // and in the week grid
+const codeOf = (g) => COURSES[g.course]?.short || g.title.trim().slice(0, 4);
+const cvar = (k) => (COURSES[k] ? `var(--${k})` : 'var(--any)');
+
+// Everything with a time on one day, with a lane for each so overlapping things sit side by side.
+function dayEvents(week, d) {
+  const s = store.state;
+  const wt = s.ticks[week] || {};
+  const { week: thisWeek, dow } = clock();
+  const ev = [];
+  for (const c of s.plan.days[d].classes) {
+    const a = toMin(c.time);
+    if (Number.isFinite(a)) ev.push({ kind: 'class', a, end: Math.min(1440, a + classMins(c)), c });
+  }
+  for (const x of dayParts(s.plan, week, d)) {
+    if (!hasTime(x.part)) continue;
+    const done = partDone(wt, x.goal, x.part);
+    ev.push({ kind: 'goal', a: x.part.start, end: Math.min(1440, x.part.start + partMins(x.part)), x, done, late: !done && week === thisWeek && d < dow });
+  }
+  // A very short goal is still drawn tall enough to hold its tick box.
+  for (const e of ev) e.b = e.kind === 'goal' ? Math.max(e.end, e.a + 30) : e.end;
+  ev.sort((p, q) => p.a - q.a || q.b - p.b);
+  let group = [], lanes = [], end = -1;
+  const close = () => { for (const e of group) e.of = lanes.length; group = []; lanes = []; };
+  for (const e of ev) {
+    if (e.a >= end) close();
+    let i = lanes.findIndex((t) => t <= e.a);
+    if (i < 0) i = lanes.length;
+    lanes[i] = e.b; e.lane = i; group.push(e); end = Math.max(end, e.b);
+  }
+  close();
+  return ev;
+}
+
+// The hours to draw: 8:30 to 20:00, stretched to fit anything outside that.
+function spanOf(lists) {
+  let a = DAY_START, b = DAY_END;
+  for (const ev of lists) for (const e of ev) { a = Math.min(a, e.a); b = Math.max(b, e.b); }
+  a = Math.max(DAY_START % 60, DAY_START - Math.ceil((DAY_START - a) / 60) * 60);
+  return [Math.min(a, DAY_START), Math.min(1440, Math.ceil(b / SNAP) * SNAP)];
+}
+
+const gutterHTML = (t0, t1, pm) => {
+  let h = '';
+  for (let m = t0; m < t1; m += 60) h += `<span style="top:${((m - t0) * pm).toFixed(1)}px">${fmtMin(m)}</span>`;
+  return `<div class="tl-gutter" style="height:${((t1 - t0) * pm).toFixed(1)}px" aria-hidden="true">${h}</div>`;
+};
+
+// One day's column. `mini` is the narrow version used in the week grid.
+function colHTML(week, d, ev, t0, t1, pm, mini) {
+  const { week: thisWeek, dow } = clock();
+  let h = '';
+  for (const e of ev) {
+    const pos = `top:${((e.a - t0) * pm).toFixed(1)}px;--h:${((e.b - e.a) * pm).toFixed(1)}px;left:${(e.lane / e.of * 100).toFixed(2)}%;--w:${(100 / e.of).toFixed(2)}%`;
+    const size = `${e.b - e.a < 45 ? ' short' : ''}${e.of > 1 ? ' narrow' : ''}`;
+    if (e.kind === 'class') {
+      const c = e.c;
+      h += mini
+        ? `<div class="ev cls mini" style="${pos};--c:${cvar(c.course)}"><span class="ev-code">${esc(COURSES[c.course]?.short || c.label.trim().slice(0, 4))}</span></div>`
+        : `<div class="ev cls${size}${(e.b - e.a) * pm >= 84 ? ' tall' : ''}" style="${pos};--c:${cvar(c.course)}"><span class="ev-t">${esc(c.label)}</span><span class="ev-h">${fmtSpan(e.a, e.end)}</span></div>`;
+      continue;
+    }
+    const { goal: g, part: p } = e.x;
+    const state = `${e.done ? ' done' : ''}${e.late ? ' late' : ''}`;
+    const said = `${esc(g.title)}, ${DAY_NAMES[d]} ${fmtSpan(e.a, e.end)}${e.done ? ', done' : e.late ? ', late' : ''}`;
+    if (mini) {
+      h += `<div class="ev goal mini${state}" data-drag="part" data-id="${esc(p.id)}" style="${pos};--c:${cvar(g.course)}">
+        <button type="button" class="ev-body" data-act="open-goal" data-id="${esc(g.id)}" data-part="${esc(p.id)}" aria-label="${said}">${e.done ? ICON_TICK : ''}<span class="ev-code">${esc(codeOf(g))}</span>${e.late ? '<span class="ev-late">late</span>' : ''}</button></div>`;
+      continue;
+    }
+    const sub = [e.x.of > 1 ? `part ${e.x.n} of ${e.x.of}` : '', e.late ? 'late' : '', p.note].filter(Boolean).join(' · ');
+    h += `<div class="ev goal${state}${size}" data-drag="part" data-id="${esc(p.id)}" style="${pos};--c:${cvar(g.course)}">
+      <input type="checkbox" class="check" data-act="tick" data-week="${esc(week)}" data-item="${esc(p.id)}" data-goal="${esc(g.id)}"${e.done ? ' checked' : ''} aria-label="${said}">
+      <button type="button" class="ev-body" data-act="open-goal" data-id="${esc(g.id)}" data-part="${esc(p.id)}">
+        <span class="ev-t">${esc(g.title)}</span>${sub ? `<span class="ev-s">${esc(sub)}</span>` : ''}
+      </button>
+      <span class="ev-h">${fmtSpan(e.a, e.end)}</span>
+      <span class="ev-size" data-resize="${esc(p.id)}" aria-hidden="true"></span>
+    </div>`;
+  }
+  if (week === thisWeek && d === dow) {
+    const now = nowLocal().minutes;
+    if (now >= t0 && now <= t1) h += `<div class="tl-now" style="top:${((now - t0) * pm).toFixed(1)}px"></div>`;
+  }
+  return `<div class="tl-col${mini ? ' wk-col' : ''}${week === thisWeek && d === dow ? ' today' : ''}" data-drop="time" data-day="${d}" data-t0="${t0}" data-t1="${t1}" data-pm="${pm}" style="height:${((t1 - t0) * pm).toFixed(1)}px;--hour:${(60 * pm).toFixed(2)}px">${h}</div>`;
+}
+
+// The line for "now" creeps down while the app is open.
+function moveNowLines() {
+  const now = nowLocal().minutes;
+  for (const el of document.querySelectorAll('.tl-now')) {
+    const col = el.parentElement;
+    el.style.top = `${((now - +col.dataset.t0) * +col.dataset.pm).toFixed(1)}px`;
+  }
+}
+
+// One day by the hour. Parts with no time wait above it, ready to be dragged into a gap.
+function dayTimelineHTML(week, d, title) {
+  const s = store.state;
+  const wt = s.ticks[week] || {};
+  const { week: thisWeek, dow } = clock();
+  const parts = dayParts(s.plan, week, d);
+  const loose = parts.filter((x) => !hasTime(x.part));
+  const done = parts.filter((x) => partDone(wt, x.goal, x.part)).length;
+  const ev = dayEvents(week, d);
+  const [t0, t1] = spanOf([ev]);
+  const day = s.plan.days[d];
+  return `<section class="card loose" data-drop="untime" data-day="${d}" aria-label="No time yet">
+      <div class="card-head"><p class="label">No time yet</p>${loose.length ? '<span class="small muted">Hold and drag into a gap</span>' : ''}</div>
+      ${loose.length ? `<ul class="chips">${loose.map((x) => {
+        const { goal: g, part: p } = x;
+        const isDone = partDone(wt, g, p);
+        const sub = [x.of > 1 ? `part ${x.n} of ${x.of}` : '', !isDone && week === thisWeek && d < dow ? 'late' : '', p.note].filter(Boolean).join(' · ');
+        return `<li class="chip${isDone ? ' done' : ''}" data-drag="part" data-id="${esc(p.id)}">
+          <input type="checkbox" class="check" data-act="tick" data-week="${esc(week)}" data-item="${esc(p.id)}" data-goal="${esc(g.id)}"${isDone ? ' checked' : ''} aria-label="${esc(g.title)}${p.note ? ', ' + esc(p.note) : ''}">
+          <button type="button" class="chip-body" data-act="open-goal" data-id="${esc(g.id)}" data-part="${esc(p.id)}"><span class="t">${sw(g.course)}<span>${esc(g.title)}</span></span>${sub ? `<span class="chip-s">${esc(sub)}</span>` : ''}</button>
+        </li>`;
+      }).join('')}</ul>`
+        : `<p class="small muted">${parts.length ? 'Everything on this day has a time. Drag one back here to take its time off.' : 'No goals on this day yet. Put one here from the Plan screen.'}</p>`}
+    </section>
+    <section class="card tl-card" aria-label="${DAY_NAMES[d]} by the hour">
+      <div class="card-head"><h2>${title}</h2><span class="mono small muted">${parts.length ? `${done}/${parts.length}` : ''}</span></div>
+      <div class="tl">${gutterHTML(t0, t1, PM_DAY)}${colHTML(week, d, ev, t0, t1, PM_DAY, false)}</div>
+      <div class="row between"><span class="small muted">${esc(day.hours)}</span><button type="button" class="btn ghost" data-act="edit-classes" data-day="${d}">Edit classes</button></div>
+    </section>`;
+}
+
+// The whole week side by side. Tap a day to open it; drag a goal to another hour or day.
+function weekGridHTML(w) {
+  const s = store.state;
+  const wt = s.ticks[w] || {};
+  const { today, week: thisWeek, dow } = clock();
+  const lists = s.plan.days.map((_, i) => dayEvents(w, i));
+  const [t0, t1] = spanOf(lists);
+  const head = s.plan.days.map((_, i) => {
+    const date = addDays(w, i);
+    return `<button type="button" class="wk-day${date === today ? ' today' : ''}" data-act="plan-day" data-day="${i}" aria-label="${DAY_NAMES[i]} ${esc(fmtShortDate(date))}${date === today ? ', today' : ''}. Open the day"><span>${short(i)}</span><b>${+date.slice(8)}</b></button>`;
+  }).join('');
+  const loose = s.plan.days.map((_, i) => `<div class="wk-loose" data-drop="untime" data-day="${i}">${dayParts(s.plan, w, i).filter((x) => !hasTime(x.part)).map((x) => {
+    const done = partDone(wt, x.goal, x.part);
+    const late = !done && w === thisWeek && i < dow;
+    return `<div class="wk-chip${done ? ' done' : late ? ' late' : ''}" data-drag="part" data-id="${esc(x.part.id)}"><button type="button" data-act="open-goal" data-id="${esc(x.goal.id)}" data-part="${esc(x.part.id)}" aria-label="${esc(x.goal.title)}, ${DAY_NAMES[i]}, no time yet${done ? ', done' : late ? ', late' : ''}">${done ? ICON_TICK : ''}${esc(codeOf(x.goal))}</button></div>`;
+  }).join('')}</div>`).join('');
+  return `<section class="card wk" aria-label="Week timetable">
+      <div class="wk-row"><span></span>${head}</div>
+      <div class="wk-row">${'<span></span>'}${loose}</div>
+      <div class="wk-row">${gutterHTML(t0, t1, PM_WEEK)}${lists.map((ev, i) => colHTML(w, i, ev, t0, t1, PM_WEEK, true)).join('')}</div>
+    </section>
+    <p class="legend" aria-hidden="true"><span><i class="lg-class"></i>Class</span><span><i class="lg-goal"></i>Goal</span><span><i class="lg-done"></i>Done</span><span><i class="lg-late"></i>Late</span><span><i class="lg-loose"></i>No time yet</span></p>`;
 }
 
 // The goal sheet: rename, pick days (more than one splits the goal), a note per day, repeat, delete.
@@ -455,8 +670,14 @@ function sheetHTML() {
       <div class="daypick" role="group" aria-label="Days for this goal">${DAY_NAMES.map((n, d) =>
         `<button type="button" class="seg" data-act="goal-day" data-id="${id}" data-day="${d}" aria-pressed="${g.parts.some((p) => p.day === d)}">${n.slice(0, 3)}</button>`).join('')}</div>
       <p class="small muted">${parts.length ? 'Pick more days to split the goal between them.' : 'Pick one day, or several to split the goal between them.'}</p></div>
-    ${parts.map((p) => `<label class="field"><span>${DAY_NAMES[p.day]}${partDone(wt, g, p) ? ' · done' : ''}</span>
-      <input type="text" id="note-${esc(p.id)}" data-act="part-note" data-id="${esc(p.id)}" value="${esc(p.note)}" placeholder="Note for this day, like “questions 1–3”" autocomplete="off"></label>`).join('')}
+    ${parts.map((p) => `<div class="partbox">
+      <label class="field"><span>${DAY_NAMES[p.day]}${partDone(wt, g, p) ? ' · done' : ''}</span>
+        <input type="text" id="note-${esc(p.id)}" data-act="part-note" data-id="${esc(p.id)}" value="${esc(p.note)}" placeholder="Note for this day, like “questions 1–3”" autocomplete="off"></label>
+      <div class="row">
+        <label class="field"><span>Starts at</span><input type="time" id="st-${esc(p.id)}" data-act="part-start" data-id="${esc(p.id)}" value="${hasTime(p) ? esc(padTime(fmtMin(p.start))) : ''}"></label>
+        <label class="field"><span>For</span><select id="ln-${esc(p.id)}" data-act="part-mins" data-id="${esc(p.id)}">${lenOptions(partMins(p), PART_LENS)}</select></label>
+        ${hasTime(p) ? `<button type="button" class="btn ghost" data-act="part-untime" data-id="${esc(p.id)}">No time</button>` : ''}
+      </div></div>`).join('')}
     <label class="toggle"><input type="checkbox" id="s-rep" data-act="goal-repeat" data-id="${id}"${rep ? ' checked' : ''}> Repeat every week</label>
     <div class="row between">
       <button type="button" class="btn" data-act="goal-whole" data-id="${id}">${whole ? 'Mark as not done' : done ? 'Done' : 'Mark the whole goal done'}</button>
@@ -466,7 +687,7 @@ function sheetHTML() {
 }
 
 // ---------- Classes and hours ----------
-const toMin = (t) => { const [h, m] = String(t).split(':').map(Number); return h * 60 + m; };
+const classSpan = (c) => { const a = toMin(c.time); return Number.isFinite(a) ? fmtSpan(a, a + classMins(c)) : c.time; };
 const padTime = (t) => (/^\d{1,2}:\d{2}$/.test(t || '') ? t.padStart(5, '0') : '');
 const unpadTime = (t) => String(t || '').replace(/^0(\d:)/, '$1');
 const defaultLabel = (course) => (COURSES[course] ? `${COURSES[course].name} lecture` : 'Class');
@@ -475,7 +696,10 @@ function classFormHTML(f) {
   const isNew = f.id === 'new';
   return `<div class="editbox" data-form="class">
     <div class="row">
-      <label class="field" style="max-width:130px"><span>Time</span><input type="time" id="c-time" data-act="cf" data-k="time" value="${esc(padTime(f.time))}"></label>
+      <label class="field"><span>Starts at</span><input type="time" id="c-time" data-act="cf" data-k="time" value="${esc(padTime(f.time))}"></label>
+      <label class="field"><span>Length</span><select id="c-mins" data-act="cf" data-k="mins">${lenOptions(+f.mins || 60, CLASS_LENS)}</select></label>
+    </div>
+    <div class="row">
       <label class="field"><span>Course</span><select id="c-course" data-act="cf" data-k="course">
         ${TRACKED.map((k) => `<option value="${k}"${k === f.course ? ' selected' : ''}>${esc(COURSES[k].name)}</option>`).join('')}
         <option value=""${f.course === '' ? ' selected' : ''}>Other</option></select></label>
@@ -502,10 +726,10 @@ function scheduleCardHTML() {
     <label class="field"><span>${DAY_NAMES[d]} hours</span><input type="text" id="h-hours" data-act="day-hours" data-day="${d}" value="${esc(day.hours)}" placeholder="8:30–20:00" autocomplete="off"></label>
     <p class="label">Classes</p>
     ${day.classes.length ? `<ul class="list">${day.classes.map((c) => f?.id === c.id ? `<li style="display:block">${classFormHTML(f)}</li>` : `<li style="align-items:center">
-      <span class="ct mono small muted" style="width:44px;flex:none">${esc(c.time)}</span>${sw(c.course)}<span class="grow">${esc(c.label)}</span>
+      <span class="ct mono small muted" style="width:92px;flex:none">${esc(classSpan(c))}</span>${sw(c.course)}<span class="grow">${esc(c.label)}</span>
       <button type="button" class="btn ghost" data-act="class-edit" data-id="${esc(c.id)}">Edit</button></li>`).join('')}</ul>` : '<p class="small muted">No classes on this day.</p>'}
     ${f?.id === 'new' ? classFormHTML(f) : '<div class="row"><button type="button" class="btn" data-act="class-new">Add class</button></div>'}
-    <p class="small muted">Classes show on the Today screen. Hours are only a reminder for yourself.</p>
+    <p class="small muted">Classes show on the Today screen and in the timetable, for as long as you set here. Hours are only a reminder for yourself.</p>
   </section>`;
 }
 
@@ -655,9 +879,9 @@ async function pushTest() {
 // ---------- Main render ----------
 function render() {
   // Never rebuild the screen under a finger: the tap or drag in progress would lose its target.
-  if (drag.active || press.hold || Date.now() - press.at < 4000) { ui.pendingRender = true; return; }
+  if (drag.active || resize.active || press.hold || Date.now() - press.at < 4000) { ui.pendingRender = true; return; }
   const a = document.activeElement;
-  if (a && $app.contains(a) && (a.matches('input[type=text], input[type=password], textarea, select'))) {
+  if (a && $app.contains(a) && (a.matches('input[type=text], input[type=password], input[type=time], textarea, select'))) {
     ui.pendingRender = true; return;
   }
   ui.pendingRender = false;
@@ -709,11 +933,15 @@ function startDrag(x, y) {
   const p = drag.pending;
   cancelPending();
   if (!p || !p.src.isConnected || !store.state) return;
-  const title = p.src.querySelector('.t')?.innerHTML || '';
+  const type = p.src.dataset.drag, item = p.src.dataset.id;
+  const part = type === 'part' ? findPart(store.state.plan, item) : null;
+  const g = part ? part.g : findGoal(store.state.plan, item);
+  if (!g) return;
   const ghost = document.createElement('div');
-  ghost.className = 'drag-ghost'; ghost.innerHTML = `<span class="t">${title}</span>`;
+  ghost.className = 'drag-ghost'; ghost.innerHTML = `<span class="t">${sw(g.course)}<span>${esc(g.title)}</span></span><span class="g-time"></span>`;
   document.body.appendChild(ghost);
-  drag.active = { id: p.id, src: p.src, type: p.src.dataset.drag, item: p.src.dataset.id, ghost, touch: p.touch, x0: p.x, y0: p.y, x, y, armed: !p.touch || p.onGrip, target: null };
+  drag.active = { id: p.id, src: p.src, type, item, ghost, touch: p.touch, x0: p.x, y0: p.y, x, y, armed: !p.touch || p.onGrip, target: null,
+    mins: part ? partMins(part.p) : 60, start: null, preview: null };
   p.src.classList.add('drag-src');
   document.body.classList.add('dragging', `drag-${drag.active.type}`);
   try { navigator.vibrate?.(8); } catch {}
@@ -725,7 +953,8 @@ function dropTargetAt(x, y) {
   const a = drag.active;
   const el = document.elementFromPoint(x, y)?.closest('[data-drop]');
   if (!el || !a.armed) return null;
-  if (el.dataset.drop === 'tray' && a.type !== 'part') return null;
+  // Only something already on a day can be taken off it, or lose its time.
+  if ((el.dataset.drop === 'tray' || el.dataset.drop === 'untime') && a.type !== 'part') return null;
   return el;
 }
 
@@ -761,6 +990,25 @@ function moveDrag(x, y) {
   clearInsert();
   if (ins?.el) ins.el.classList.add(ins.before ? 'ins-before' : 'ins-end');
   a.before = ins ? ins.before : undefined;
+  // Over a timetable column, an outline shows the quarter hour it would start at.
+  if (t?.dataset.drop === 'time') {
+    const r = t.getBoundingClientRect();
+    const pm = +t.dataset.pm, t0 = +t.dataset.t0, t1 = +t.dataset.t1;
+    const len = Math.min(a.mins, t1 - t0);
+    const start = Math.max(t0, Math.min(t1 - len, t0 + Math.round((y - r.top - (a.touch ? 34 : 10)) / pm / SNAP) * SNAP));
+    if (!a.preview || a.preview.parentNode !== t) {
+      a.preview?.remove();
+      a.preview = document.createElement('div'); a.preview.className = 'tl-preview';
+      t.appendChild(a.preview);
+    }
+    a.start = start;
+    a.preview.style.top = `${(start - t0) * pm}px`;
+    a.preview.style.height = `${len * pm}px`;
+    a.ghost.querySelector('.g-time').textContent = `${short(+t.dataset.day)} ${fmtSpan(start, start + a.mins)}`;
+  } else if (a.preview) {
+    a.preview.remove(); a.preview = null; a.start = null;
+    a.ghost.querySelector('.g-time').textContent = '';
+  }
 }
 
 // Scrolls the page when the finger is near the top, or just above the strip of days.
@@ -782,6 +1030,7 @@ function endDrag(apply) {
   cancelAnimationFrame(drag.raf);
   drag.active = null;
   a.ghost.remove();
+  a.preview?.remove();
   a.src.classList.remove('drag-src');
   a.target?.classList.remove('drop-on');
   clearInsert();
@@ -789,8 +1038,11 @@ function endDrag(apply) {
   if (a.armed) drag.clickBlock = Date.now();
   const t = apply ? a.target : null;
   if (t) {
-    if (t.dataset.drop === 'day' && a.type === 'goal') placeGoal(a.item, +t.dataset.day, false, a.before);
-    else if (t.dataset.drop === 'day') movePart(a.item, +t.dataset.day, a.before);
+    const kind = t.dataset.drop, d = +t.dataset.day;
+    if (kind === 'time') { if (a.start != null) { if (a.type === 'goal') placeGoalAt(a.item, d, a.start); else setPartTime(a.item, d, a.start); } }
+    else if (kind === 'untime') setPartTime(a.item, d, null);
+    else if (kind === 'day' && a.type === 'goal') placeGoal(a.item, d, false, a.before);
+    else if (kind === 'day') movePart(a.item, d, a.before);
     else if (a.type === 'part') removePart(a.item);
   }
   if (ui.pendingRender) render();
@@ -799,7 +1051,7 @@ function endDrag(apply) {
 document.addEventListener('pointerdown', (e) => {
   if (drag.active || drag.pending || e.button > 0 || !e.isPrimary) return;
   const src = e.target.closest?.('[data-drag]');
-  if (!src || e.target.closest('input, select, textarea')) return;
+  if (!src || e.target.closest('input, select, textarea, [data-resize]')) return;
   const touch = e.pointerType !== 'mouse';
   const onGrip = !!e.target.closest('.grip');
   drag.pending = { src, id: e.pointerId, x: e.clientX, y: e.clientY, touch, onGrip };
@@ -825,10 +1077,48 @@ document.addEventListener('pointercancel', (e) => {
 });
 window.addEventListener('blur', () => { cancelPending(); endDrag(false); });
 // While a drag is on, the page must not scroll under the finger.
-document.addEventListener('touchmove', (e) => { if ((drag.active || drag.pending?.onGrip) && e.cancelable) e.preventDefault(); }, { passive: false });
+document.addEventListener('touchmove', (e) => { if ((drag.active || resize.active || drag.pending?.onGrip) && e.cancelable) e.preventDefault(); }, { passive: false });
 document.addEventListener('contextmenu', (e) => { if (e.target.closest?.('[data-drag]') && (drag.active || drag.pending)) e.preventDefault(); });
 // The tap that ends a drag isn't a click on whatever was under it.
 document.addEventListener('click', (e) => { if (Date.now() - drag.clickBlock < 350) { e.stopPropagation(); e.preventDefault(); } }, true);
+
+// ---------- Resizing ----------
+// The bar at the bottom of a goal in the timeline: drag it to make the goal longer or shorter.
+const resize = { active: null };
+document.addEventListener('pointerdown', (e) => {
+  const handle = e.target.closest?.('[data-resize]');
+  if (!handle || resize.active || drag.active || e.button > 0 || !e.isPrimary || !store.state) return;
+  const f = findPart(store.state.plan, handle.dataset.resize);
+  const el = handle.closest('.ev'), col = handle.closest('.tl-col');
+  if (!f || !hasTime(f.p) || !el || !col) return;
+  e.preventDefault();
+  resize.active = { id: e.pointerId, part: f.p.id, el, y0: e.clientY, mins0: partMins(f.p), mins: partMins(f.p), start: f.p.start, pm: +col.dataset.pm };
+  el.classList.add('resizing');
+  try { handle.setPointerCapture(e.pointerId); } catch {}
+});
+document.addEventListener('pointermove', (e) => {
+  const r = resize.active;
+  if (!r || e.pointerId !== r.id) return;
+  const mins = Math.max(SNAP, Math.min(1440 - r.start, r.mins0 + Math.round((e.clientY - r.y0) / r.pm / SNAP) * SNAP));
+  if (mins === r.mins) return;
+  r.mins = mins;
+  r.el.style.setProperty('--h', `${Math.max(mins, 30) * r.pm}px`);
+  const label = r.el.querySelector('.ev-h');
+  if (label) label.textContent = fmtSpan(r.start, r.start + mins);
+});
+function endResize(e, apply) {
+  const r = resize.active;
+  if (!r || (e && e.pointerId !== r.id)) return;
+  resize.active = null;
+  r.el.classList.remove('resizing');
+  drag.clickBlock = Date.now();
+  if (apply && r.mins !== r.mins0) commitPlan((p) => { const x = findPart(p, r.part); if (x) x.p.mins = r.mins; });
+  else { ui.pendingRender = true; }
+  setTimeout(() => { if (ui.pendingRender) render(); }, 0);
+}
+document.addEventListener('pointerup', (e) => endResize(e, true));
+document.addEventListener('pointercancel', (e) => endResize(e, false));
+window.addEventListener('blur', () => endResize(null, false));
 
 // ---------- Events ----------
 function stopRepeat(p, repeatId, afterWeek) {
@@ -843,7 +1133,7 @@ document.addEventListener('click', async (e) => {
   // Buttons don't take focus on iPhone, so finish any field being edited first.
   const a = document.activeElement;
   const act = el.dataset.act;
-  if (a && a !== document.body && a.matches('input[type=text], textarea, select') && act !== 'goal-add') a.blur();
+  if (a && a !== document.body && a.matches('input[type=text], input[type=time], textarea, select') && act !== 'goal-add') a.blur();
   const s = store.state;
   const { dow, week } = clock();
 
@@ -851,6 +1141,12 @@ document.addEventListener('click', async (e) => {
     case 'confirm': ui.confirm = el.dataset.key; render(); break;
     case 'cancel-confirm': ui.confirm = null; render(); break;
     case 'which': ui.which = el.dataset.which; render(); break;
+    case 'today-view': ui.todayView = el.dataset.v; LS.set('sp-today-view', ui.todayView); render(); break;
+    case 'plan-view': ui.planView = el.dataset.v; LS.set('sp-plan-view', ui.planView); ui.planDay = null; ui.goalsOpen = false; render(); scrollTo(0, 0); break;
+    case 'plan-day': ui.planDay = +el.dataset.day; render(); break;
+    case 'plan-day-back': ui.planDay = null; render(); break;
+    case 'goals-toggle': ui.goalsOpen = !ui.goalsOpen; render(); break;
+    case 'part-untime': { const f = findPart(s.plan, el.dataset.id); if (f) setPartTime(f.p.id, f.p.day, null); break; }
     case 'plan-open':
       ui.which = el.dataset.which;
       if (ui.view === 'plan') render(); else location.hash = '#plan';
@@ -859,12 +1155,12 @@ document.addEventListener('click', async (e) => {
     case 'open-goal': ui.sheet = { goalId: el.dataset.id }; ui.confirm = null; render(); break;
     case 'sheet-close': ui.sheet = null; ui.confirm = null; render(); break;
 
-    case 'edit-classes': ui.schedDay = dow; ui.classForm = null; ui.scrollTarget = 'sched'; location.hash = '#options'; break;
+    case 'edit-classes': ui.schedDay = el.dataset.day != null ? +el.dataset.day : dow; ui.classForm = null; ui.scrollTarget = 'sched'; location.hash = '#options'; break;
     case 'sched-day': ui.schedDay = +el.dataset.day; ui.classForm = null; ui.confirm = null; render(); break;
-    case 'class-new': ui.classForm = { id: 'new', time: '', course: TRACKED[0], label: '', err: null }; ui.confirm = null; render(); break;
+    case 'class-new': ui.classForm = { id: 'new', time: '', mins: 60, course: TRACKED[0], label: '', err: null }; ui.confirm = null; render(); break;
     case 'class-edit': {
       const c = s.plan.days[ui.schedDay ?? dow].classes.find((x) => x.id === el.dataset.id); if (!c) break;
-      ui.classForm = { id: c.id, time: c.time, course: c.course, label: c.label, err: null }; ui.confirm = null; render();
+      ui.classForm = { id: c.id, time: c.time, mins: classMins(c), course: c.course, label: c.label, err: null }; ui.confirm = null; render();
       break;
     }
     case 'class-cancel': ui.classForm = null; ui.confirm = null; render(); break;
@@ -872,7 +1168,7 @@ document.addEventListener('click', async (e) => {
       const f = ui.classForm; if (!f) break;
       const d = ui.schedDay ?? dow;
       if (!/^\d{1,2}:\d{2}$/.test(f.time)) { f.err = 'Pick a time.'; render(); break; }
-      const data = { time: f.time, course: f.course, label: f.label.trim().slice(0, 80) || defaultLabel(f.course) };
+      const data = { time: f.time, mins: Math.min(720, Math.max(15, +f.mins || 60)), course: f.course, label: f.label.trim().slice(0, 80) || defaultLabel(f.course) };
       ui.classForm = null; ui.confirm = null;
       commitPlan((p) => {
         const list = p.days[d].classes;
@@ -903,9 +1199,10 @@ document.addEventListener('click', async (e) => {
     case 'part-today': movePart(el.dataset.id, dow); break;
     case 'usual': {
       const w = planWeek();
-      const todo = weekGoals(s.plan, w).filter((g) => !g.parts.length && !goalDone(s.ticks[w], g) && usualDays(s.plan, g).length).map((g) => [g.id, usualDays(s.plan, g)]);
+      const todo = weekGoals(s.plan, w).filter((g) => !g.parts.length && !goalDone(s.ticks[w], g) && usualDays(s.plan, g).length).map((g) => [g.id, usualSlots(s.plan, g)]);
       const now = Date.now();
-      commitPlan((p) => { for (const [id, days] of todo) findGoal(p, id).parts = days.map((d, i) => ({ id: uid() + i, day: d, note: '', at: now + i })); });
+      // Last week's times come along too.
+      commitPlan((p) => { for (const [id, slots] of todo) findGoal(p, id).parts = slots.map((x, i) => ({ id: uid() + i, day: x.day, note: '', at: now + i, ...(x.start != null ? { start: x.start, mins: x.mins } : {}) })); });
       toast(`${plural(todo.length, 'goal')} placed. Drag to change.`);
       break;
     }
@@ -1023,6 +1320,17 @@ document.addEventListener('change', (e) => {
     if (findPart(s.plan, id)?.p.note === v) return;
     holdRender();
     commitPlan((p) => { const f = findPart(p, id); if (f) f.p.note = v; });
+  } else if (act === 'part-start') {
+    const id = el.dataset.id; const m = toMin(el.value);
+    const f = findPart(s.plan, id);
+    if (!f || !Number.isFinite(m) || f.p.start === m) return;
+    commitPlan((p) => { const x = findPart(p, id); if (x) x.p.start = m; });
+  } else if (act === 'part-mins') {
+    const id = el.dataset.id; const m = +el.value;
+    const f = findPart(s.plan, id);
+    if (!f || !(m > 0) || partMins(f.p) === m) return;
+    commitPlan((p) => { const x = findPart(p, id); if (x) x.p.mins = m; });
+    el.blur();
   } else if (act === 'goal-repeat') {
     const id = el.dataset.id; const g = findGoal(s.plan, id); if (!g) return;
     if (el.checked) {
@@ -1065,7 +1373,7 @@ document.addEventListener('keydown', (e) => {
 function route() {
   const v = location.hash.replace('#', '').replace('options', 'settings');
   ui.view = ['today', 'plan', 'settings', 'setup'].includes(v) ? v : 'today';
-  ui.confirm = null; ui.sheet = null;
+  ui.confirm = null; ui.sheet = null; ui.planDay = null; ui.goalsOpen = false;
   if (ui.view !== 'settings') ui.classForm = null;
   if (ui.view === 'settings' && !DEMO) refreshPushState().then(render);
   render();
@@ -1090,7 +1398,7 @@ document.addEventListener('visibilitychange', () => {
   newDay();
   pull();
 });
-setInterval(() => { if (newDay()) render(); }, 60000);
+setInterval(() => { if (newDay()) render(); else moveNowLines(); }, 60000);
 
 if (!DEMO && 'serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
 ui.lastDate = clock().today;

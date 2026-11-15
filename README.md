@@ -2,8 +2,9 @@
 
 A phone app for planning the study week around goals. On Saturday you list what you want done next week, then put each goal on the days you'll work on it. A goal can sit on several days, which splits it into parts, and each part can carry a note such as "questions 1–3".
 
-- **Plan:** hold a goal and drag it to a day, or tap it and pick the days. Goals marked "Every week" come back each week, ready to place.
-- **Today:** the parts placed on today, with a tick box each. Unticked parts from earlier days show as behind, and goals with no day are flagged.
+- **Plan:** hold a goal and drag it to a day, or tap it and pick the days. Goals marked "Every week" come back each week, ready to place. The grid button shows the whole week as a timetable, with classes and goals by the hour.
+- **Today:** the parts placed on today, with a tick box each. Unticked parts from earlier days show as behind, and goals with no day are flagged. The Timeline switch shows the day by the hour.
+- **Times:** a goal's part can have a start time and a length, both optional. In a timeline, hold a part and drag it into a free gap, drag the bar at its bottom to change the length, or set both in the goal's sheet. Each class has a length too, set in Settings.
 - **Reminders:** a morning summary and an evening nudge. On Saturday they also say if next week isn't planned.
 
 Works offline and syncs between devices.
