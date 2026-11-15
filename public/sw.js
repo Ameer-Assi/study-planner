@@ -1,5 +1,5 @@
 // Offline support and notifications.
-const CACHE = 'planner-v9';
+const CACHE = 'planner-v10';
 const SHELL = [
   '/', '/app.js', '/shared.js', '/styles.css', '/manifest.webmanifest',
   '/icons/icon-192.png', '/icons/icon-512.png', '/icons/apple-touch-icon.png',

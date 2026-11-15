@@ -4,7 +4,7 @@ import {
   unplacedGoals, planningLeft, usualDays,
 } from './shared.js';
 
-const VERSION = '2.1.0';
+const VERSION = '2.2.0';
 // Preview mode: runs without a server and keeps everything on this device.
 const DEMO = !!globalThis.PLANNER_DEMO;
 const PRE = DEMO ? 'spd-' : 'sp-';
@@ -23,6 +23,7 @@ const store = {
 const ui = {
   view: 'today', which: null, sheet: null, confirm: null,
   addTitle: '', addCourse: 'auto', addRepeat: false,
+  schedDay: null, classForm: null, scrollTarget: null,
   sync: DEMO ? 'demo' : 'idle', push: null, msgs: {}, pendingRender: false, lastDate: null,
 };
 const save = () => { LS.set(PRE + 'state', store.state); if (!DEMO) LS.set('sp-outbox', store.outbox); };
@@ -358,7 +359,7 @@ function viewToday() {
     ${parts.length ? `<ul class="parts">${parts.map((x) => partHTML(x, week, { drag: parts.length > 1 })).join('')}</ul>`
       : `<p class="small muted">${goals.length ? 'Nothing is placed on today.' : 'No goals for this week yet.'}</p>
          <div class="row"><button type="button" class="btn" data-act="plan-open" data-which="this">${goals.length ? 'Open the plan' : 'Plan this week'}</button></div>`}
-    ${d.classes.length ? `<p class="label">Classes</p><ul class="classes">${d.classes.map((c) => `<li><span class="ct">${esc(c.time)}</span>${sw(c.course)}<span>${esc(c.label)}</span></li>`).join('')}</ul>` : ''}
+    ${d.classes.length ? `<div class="row between"><p class="label">Classes</p><button type="button" class="btn ghost" data-act="edit-classes">Edit</button></div><ul class="classes">${d.classes.map((c) => `<li><span class="ct">${esc(c.time)}</span>${sw(c.course)}<span>${esc(c.label)}</span></li>`).join('')}</ul>` : ''}
   </section>`;
 
   if (goals.length) {
@@ -464,6 +465,50 @@ function sheetHTML() {
   </section>`;
 }
 
+// ---------- Classes and hours ----------
+const toMin = (t) => { const [h, m] = String(t).split(':').map(Number); return h * 60 + m; };
+const padTime = (t) => (/^\d{1,2}:\d{2}$/.test(t || '') ? t.padStart(5, '0') : '');
+const unpadTime = (t) => String(t || '').replace(/^0(\d:)/, '$1');
+const defaultLabel = (course) => (COURSES[course] ? `${COURSES[course].name} lecture` : 'Class');
+
+function classFormHTML(f) {
+  const isNew = f.id === 'new';
+  return `<div class="editbox" data-form="class">
+    <div class="row">
+      <label class="field" style="max-width:130px"><span>Time</span><input type="time" id="c-time" data-act="cf" data-k="time" value="${esc(padTime(f.time))}"></label>
+      <label class="field"><span>Course</span><select id="c-course" data-act="cf" data-k="course">
+        ${TRACKED.map((k) => `<option value="${k}"${k === f.course ? ' selected' : ''}>${esc(COURSES[k].name)}</option>`).join('')}
+        <option value=""${f.course === '' ? ' selected' : ''}>Other</option></select></label>
+    </div>
+    <label class="field"><span>Name</span><input type="text" id="c-label" data-act="cf" data-k="label" value="${esc(f.label)}" placeholder="${esc(defaultLabel(f.course))}" autocomplete="off"></label>
+    ${f.err ? `<p class="msg err">${esc(f.err)}</p>` : ''}
+    <div class="row between">
+      <div class="row tight">${isNew ? '' : ui.confirm === 'class-del'
+        ? '<button type="button" class="btn danger" data-act="class-delete">Delete class</button><button type="button" class="btn ghost" data-act="cancel-confirm">Keep</button>'
+        : '<button type="button" class="btn ghost danger" data-act="confirm" data-key="class-del">Delete</button>'}</div>
+      <div class="row tight"><button type="button" class="btn ghost" data-act="class-cancel">Cancel</button><button type="button" class="btn primary" data-act="class-save">${isNew ? 'Add class' : 'Save'}</button></div>
+    </div>
+  </div>`;
+}
+
+function scheduleCardHTML() {
+  const s = store.state;
+  const d = ui.schedDay ?? clock().dow;
+  const day = s.plan.days[d];
+  const f = ui.classForm;
+  return `<section class="card" id="sched"><h2>Classes and hours</h2>
+    <div class="daypick" role="group" aria-label="Day">${DAY_NAMES.map((n, i) =>
+      `<button type="button" class="seg" data-act="sched-day" data-day="${i}" aria-pressed="${i === d}">${n.slice(0, 3)}</button>`).join('')}</div>
+    <label class="field"><span>${DAY_NAMES[d]} hours</span><input type="text" id="h-hours" data-act="day-hours" data-day="${d}" value="${esc(day.hours)}" placeholder="8:30–20:00" autocomplete="off"></label>
+    <p class="label">Classes</p>
+    ${day.classes.length ? `<ul class="list">${day.classes.map((c) => f?.id === c.id ? `<li style="display:block">${classFormHTML(f)}</li>` : `<li style="align-items:center">
+      <span class="ct mono small muted" style="width:44px;flex:none">${esc(c.time)}</span>${sw(c.course)}<span class="grow">${esc(c.label)}</span>
+      <button type="button" class="btn ghost" data-act="class-edit" data-id="${esc(c.id)}">Edit</button></li>`).join('')}</ul>` : '<p class="small muted">No classes on this day.</p>'}
+    ${f?.id === 'new' ? classFormHTML(f) : '<div class="row"><button type="button" class="btn" data-act="class-new">Add class</button></div>'}
+    <p class="small muted">Classes show on the Today screen. Hours are only a reminder for yourself.</p>
+  </section>`;
+}
+
 function timeField(id, label, value) {
   return `<label class="field"><span>${label}</span><input type="time" id="${id}" step="900" value="${esc(value)}" data-act="reminder-time" data-key="${id.replace('r-', '')}"></label>`;
 }
@@ -496,6 +541,7 @@ function viewSettings() {
       <label class="toggle"><input type="checkbox" id="r-off" data-act="reminders-off"${r.off ? ' checked' : ''}> Pause all reminders</label>
       <p class="small muted">Israel time, in 15-minute steps. The morning summary lists what’s on today, anything behind, and goals with no day. The evening nudge only comes if something is still open. On Saturday both tell you if next week isn’t planned.</p>
     </section>
+    ${scheduleCardHTML()}
     <section class="card"><div class="card-head"><h2>Repeating goals</h2><span class="small muted">${reps.length}</span></div>
       ${reps.length ? `<ul class="list">${reps.map((x) => `<li style="align-items:center"><div class="grow t">${sw(x.course)}<span>${esc(x.title)}</span></div>
         ${ui.confirm === 'rep-' + x.id
@@ -813,6 +859,39 @@ document.addEventListener('click', async (e) => {
     case 'open-goal': ui.sheet = { goalId: el.dataset.id }; ui.confirm = null; render(); break;
     case 'sheet-close': ui.sheet = null; ui.confirm = null; render(); break;
 
+    case 'edit-classes': ui.schedDay = dow; ui.classForm = null; ui.scrollTarget = 'sched'; location.hash = '#options'; break;
+    case 'sched-day': ui.schedDay = +el.dataset.day; ui.classForm = null; ui.confirm = null; render(); break;
+    case 'class-new': ui.classForm = { id: 'new', time: '', course: TRACKED[0], label: '', err: null }; ui.confirm = null; render(); break;
+    case 'class-edit': {
+      const c = s.plan.days[ui.schedDay ?? dow].classes.find((x) => x.id === el.dataset.id); if (!c) break;
+      ui.classForm = { id: c.id, time: c.time, course: c.course, label: c.label, err: null }; ui.confirm = null; render();
+      break;
+    }
+    case 'class-cancel': ui.classForm = null; ui.confirm = null; render(); break;
+    case 'class-save': {
+      const f = ui.classForm; if (!f) break;
+      const d = ui.schedDay ?? dow;
+      if (!/^\d{1,2}:\d{2}$/.test(f.time)) { f.err = 'Pick a time.'; render(); break; }
+      const data = { time: f.time, course: f.course, label: f.label.trim().slice(0, 80) || defaultLabel(f.course) };
+      ui.classForm = null; ui.confirm = null;
+      commitPlan((p) => {
+        const list = p.days[d].classes;
+        if (f.id === 'new') list.push({ id: uid(), ...data });
+        else Object.assign(list.find((x) => x.id === f.id) || {}, data);
+        list.sort((a, b) => toMin(a.time) - toMin(b.time));
+      });
+      toast(f.id === 'new' ? `Added to ${DAY_NAMES[d]}` : 'Class saved');
+      break;
+    }
+    case 'class-delete': {
+      const f = ui.classForm; if (!f) break;
+      const d = ui.schedDay ?? dow;
+      ui.classForm = null; ui.confirm = null;
+      commitPlan((p) => { p.days[d].classes = p.days[d].classes.filter((x) => x.id !== f.id); });
+      toast('Class deleted');
+      break;
+    }
+
     case 'goal-add': addGoal(); break;
     case 'goal-day': {
       const g = findGoal(s.plan, el.dataset.id); if (!g) break;
@@ -921,6 +1000,11 @@ document.addEventListener('change', (e) => {
     if (el.checked && g && !was && goalDone(store.state.ticks[week], g)) toast(g.parts.length > 1 ? `${g.title}: all ${g.parts.length} parts done` : `${g.title}: done`);
   } else if (act === 'add-course') {
     ui.addCourse = el.value;
+  } else if (act === 'day-hours') {
+    const d = +el.dataset.day; const v = el.value.trim().slice(0, 60);
+    if (v === s.plan.days[d].hours) return;
+    holdRender();
+    commitPlan((p) => { p.days[d].hours = v; });
   } else if (act === 'add-repeat') {
     ui.addRepeat = el.checked;
   } else if (act === 'goal-title' || act === 'goal-course') {
@@ -964,7 +1048,14 @@ document.addEventListener('change', (e) => {
   }
 });
 
-document.addEventListener('input', (e) => { if (e.target.id === 'g-title') ui.addTitle = e.target.value; });
+document.addEventListener('input', (e) => {
+  const el = e.target;
+  if (el.id === 'g-title') ui.addTitle = el.value;
+  else if (el.dataset?.act === 'cf' && ui.classForm) {
+    ui.classForm[el.dataset.k] = el.dataset.k === 'time' ? unpadTime(el.value) : el.value;
+    if (el.dataset.k === 'course') { const lab = document.getElementById('c-label'); if (lab) lab.placeholder = defaultLabel(el.value); }
+  }
+});
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.isComposing && e.target.id === 'g-title') { e.preventDefault(); addGoal(); }
   else if (e.key === 'Enter' && e.target.matches?.('.sheet input[type=text]')) e.target.blur();
@@ -975,9 +1066,11 @@ function route() {
   const v = location.hash.replace('#', '').replace('options', 'settings');
   ui.view = ['today', 'plan', 'settings', 'setup'].includes(v) ? v : 'today';
   ui.confirm = null; ui.sheet = null;
+  if (ui.view !== 'settings') ui.classForm = null;
   if (ui.view === 'settings' && !DEMO) refreshPushState().then(render);
   render();
   scrollTo(0, 0);
+  if (ui.scrollTarget) { document.getElementById(ui.scrollTarget)?.scrollIntoView({ block: 'start' }); ui.scrollTarget = null; }
 }
 
 // A new day (or a new week) started while the app was open.
