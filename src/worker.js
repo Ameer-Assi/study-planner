@@ -1,7 +1,7 @@
 // Study planner server: sync API on D1, plus scheduled reminders over Web Push.
 import { sendPush } from './push.js';
 import {
-  DEFAULT_PLAN, DEFAULT_SETTINGS, DAY_NAMES, migratePlan, ensureWeek, nowLocal, weekOf, addDays, dowOf,
+  DEFAULT_PLAN, DEFAULT_SETTINGS, DAY_NAMES, migratePlan, renameCourses, ensureWeek, nowLocal, weekOf, addDays, dowOf,
   dayParts, lateParts, openToday, unplacedGoals, planningLeft, partLabel,
 } from '../public/shared.js';
 
@@ -54,6 +54,8 @@ async function loadCore(db) {
       ]);
       plan.value = m.plan; plan.updated = now;
     }
+    // Saved with the same time, so an edit made on a phone after it still wins.
+    if (renameCourses(plan.value)) await putKV(db, 'plan', plan.value, plan.updated).run();
   }
   return { plan, settings };
 }

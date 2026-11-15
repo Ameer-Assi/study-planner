@@ -1,11 +1,11 @@
 import {
   COURSES, TRACKED, DAY_NAMES, DEFAULT_PLAN, DEFAULT_SETTINGS, nowLocal, addDays, weekOf, fmtShortDate, guessCourse,
-  migratePlan, ensureWeek, pruneGoals, weekGoals, repeatOf, sortedParts, goalDone, partDone, dayParts, lateParts,
+  migratePlan, renameCourses, ensureWeek, pruneGoals, weekGoals, repeatOf, sortedParts, goalDone, partDone, dayParts, lateParts,
   unplacedGoals, planningLeft, usualDays, usualSlots,
   DAY_START, DAY_END, toMin, fmtMin, fmtSpan, classMins, partMins, hasTime,
 } from './shared.js';
 
-const VERSION = '2.3.0';
+const VERSION = '2.3.1';
 // Preview mode: runs without a server and keeps everything on this device.
 const DEMO = !!globalThis.PLANNER_DEMO;
 const PRE = DEMO ? 'spd-' : 'sp-';
@@ -102,6 +102,7 @@ function fromServer(d) {
 // next week's repeating goals. Nothing is sent to the server for this.
 function prepare(s) {
   s.plan = migratePlan(s.plan).plan;
+  renameCourses(s.plan);
   s.ticks ||= {};
   const { week } = clock();
   ensureWeek(s.plan, week); ensureWeek(s.plan, addDays(week, 7));

@@ -40,7 +40,8 @@ export const COURSES = {
   sig: { name: 'Signals', short: 'Sig', words: ['signal', 'sig'] },
   ds: { name: 'Data structures 1', short: 'DS1', words: ['data structure', 'ds1', 'ds'] },
   prob: { name: 'Probability', short: 'Prob', words: ['probability', 'probabilty', 'prob', 'webwork'] },
-  ssd: { name: 'Solid state', short: 'SSD', words: ['solid state', 'solid', 'ssd'] },
+  // Fundamentals of Semiconductor Devices (יסודות התקני מוליכים למחצה). The key stays 'ssd' so saved data keeps working.
+  ssd: { name: 'Semiconductors', short: 'Semi', words: ['semiconductor', 'semi conductor', 'semi', 'solid state', 'solid', 'ssd'] },
   org: { name: 'Organization', short: 'Org', words: ['organization', 'organisation', 'assembly', 'org'] },
   qp: { name: 'Quantum', short: 'QP', words: ['quantum', 'qp'] },
 };
@@ -84,8 +85,8 @@ export const DEFAULT_PLAN = {
   days: [
     day('8:30–20:00', [cl('c1', '9:30', 'ds', 'DS1 lecture', 120), cl('c2', '12:30', 'ds', 'DS1 tutorial'), cl('c3', '13:30', 'qp', 'Quantum tutorial'), cl('c4', '15:30', 'org', 'Organization tutorial'), cl('c5', '16:30', 'sig', 'Signals lecture', 120)]),
     day('8:30–20:00', [cl('c6', '12:30', 'qp', 'Quantum lecture', 120), cl('c7', '14:30', 'prob', 'Probability lecture', 120), cl('c8', '16:30', 'sig', 'Signals lecture', 120)]),
-    day('8:30–20:00', [cl('c9', '8:30', 'org', 'Organization lecture', 120), cl('c10', '12:30', 'ssd', 'Solid state lecture', 180), cl('c11', '16:30', 'ssd', 'Solid state tutorial')]),
-    day('8:30–20:00', [cl('c12', '9:30', 'ssd', 'Solid state session'), cl('c13', '10:30', 'prob', 'Probability tutorial'), cl('c14', '11:30', 'qp', 'Quantum lecture'), cl('c15', '15:30', 'prob', 'Probability lecture'), cl('c16', '16:30', 'sig', 'Signals tutorial', 120)]),
+    day('8:30–20:00', [cl('c9', '8:30', 'org', 'Organization lecture', 120), cl('c10', '12:30', 'ssd', 'Semiconductors lecture', 180), cl('c11', '16:30', 'ssd', 'Semiconductors tutorial')]),
+    day('8:30–20:00', [cl('c12', '9:30', 'ssd', 'Semiconductors session'), cl('c13', '10:30', 'prob', 'Probability tutorial'), cl('c14', '11:30', 'qp', 'Quantum lecture'), cl('c15', '15:30', 'prob', 'Probability lecture'), cl('c16', '16:30', 'sig', 'Signals tutorial', 120)]),
     day('9:00–20:00 · no classes', []),
     day('up to 2 hours', []),
     day('up to 3 hours', []),
@@ -134,6 +135,21 @@ export function migratePlan(plan) {
     else if (g.week >= addDays(V2_START, -7)) p.goals.push({ id: g.id, title: g.title, course: g.course || '', week: g.week, parts: [] });
   }
   return { plan: p, changed: true };
+}
+
+// The semiconductors course was first named "Solid state". Classes and goals saved with
+// that name are renamed. Safe to run any number of times, on the phone or the server.
+export function renameCourses(plan) {
+  let changed = false;
+  const fix = (x, key) => {
+    if (x?.course === 'ssd' && typeof x[key] === 'string' && /^solid state\b/i.test(x[key])) {
+      x[key] = x[key].replace(/^solid state\b/i, 'Semiconductors'); changed = true;
+    }
+  };
+  for (const d of plan?.days || []) for (const c of d.classes || []) fix(c, 'label');
+  for (const r of plan?.repeats || []) fix(r, 'title');
+  for (const g of plan?.goals || []) fix(g, 'title');
+  return changed;
 }
 
 export const DEFAULT_SETTINGS = {
