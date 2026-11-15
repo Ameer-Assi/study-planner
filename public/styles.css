@@ -120,6 +120,8 @@ body.dragging main { padding-bottom: 240px; }
 body.dragging #nav { visibility: hidden; }
 body.dragging .toast { display: none; }
 .card.drop-on { outline: 2px solid var(--fg); outline-offset: -1px; background: var(--sunk); }
+.part.ins-before { box-shadow: inset 0 3px 0 var(--fg); }
+.parts.ins-end { box-shadow: 0 3px 0 var(--fg); }
 .drag-ghost { position: fixed; left: 0; top: 0; z-index: 50; pointer-events: none; max-width: min(80vw, 320px); background: var(--fg); border-radius: 999px; padding: 8px 14px; box-shadow: 0 6px 20px rgb(0 0 0 / .28); will-change: transform; }
 .drag-ghost .t { color: var(--bg); }
 .drag-ghost .t > span:not(.sw) { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

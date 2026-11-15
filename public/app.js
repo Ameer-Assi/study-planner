@@ -4,7 +4,7 @@ import {
   unplacedGoals, planningLeft, usualDays,
 } from './shared.js';
 
-const VERSION = '2.0.0';
+const VERSION = '2.1.0';
 // Preview mode: runs without a server and keeps everything on this device.
 const DEMO = !!globalThis.PLANNER_DEMO;
 const PRE = DEMO ? 'spd-' : 'sp-';
@@ -176,19 +176,34 @@ const findGoal = (plan, id) => plan.goals.find((g) => g.id === id);
 const findPart = (plan, id) => { for (const g of plan.goals) { const p = g.parts.find((x) => x.id === id); if (p) return { g, p }; } return null; };
 
 // ---------- Goal actions ----------
-function placeGoal(goalId, d, quiet) {
+// A day's order is the order of its parts' `at` values. Reordering numbers them 1, 2, 3…,
+// so anything placed later (at = now) still lands at the end.
+const dayOrder = (week, d) => dayParts(store.state.plan, week, d).map((x) => x.part.id);
+function withInserted(week, d, id, before) {
+  const ids = dayOrder(week, d).filter((x) => x !== id);
+  const at = before ? ids.indexOf(before) : -1;
+  ids.splice(at >= 0 ? at : ids.length, 0, id);
+  return ids;
+}
+function orderDay(plan, ids) { ids.forEach((id, i) => { const f = findPart(plan, id); if (f) f.p.at = i + 1; }); }
+
+// `before`: the part to go in front of, null for the end of the day, undefined when no position was picked.
+function placeGoal(goalId, d, quiet, before) {
   const g = findGoal(store.state.plan, goalId);
   if (!g) return;
   if (g.parts.some((p) => p.day === d)) { toast(`Already on ${DAY_NAMES[d]}`); return; }
-  commitPlan((p) => { findGoal(p, goalId).parts.push({ id: uid(), day: d, note: '', at: Date.now() }); });
+  const id = uid();
+  const order = before === undefined ? null : withInserted(g.week, d, id, before);
+  commitPlan((p) => { findGoal(p, goalId).parts.push({ id, day: d, note: '', at: Date.now() }); if (order) orderDay(p, order); });
   const days = sortedParts(findGoal(store.state.plan, goalId)).map((p) => short(p.day));
   if (!quiet) toast(days.length > 1 ? `${g.title}: split over ${andList(days)}` : `${g.title}: ${DAY_NAMES[d]}`);
 }
-function movePart(partId, d) {
+function movePart(partId, d, before) {
   const f = findPart(store.state.plan, partId);
-  if (!f || f.p.day === d) return;
+  if (!f) return;
+  const same = f.p.day === d;
   // The goal is already on that day: the two parts become one.
-  if (f.g.parts.some((p) => p.day === d)) {
+  if (!same && f.g.parts.some((p) => p.day === d)) {
     commitPlan((p) => {
       const { g, p: x } = findPart(p, partId);
       const there = g.parts.find((q) => q.day === d);
@@ -198,8 +213,13 @@ function movePart(partId, d) {
     toast(`Joined with its ${DAY_NAMES[d]} part`);
     return;
   }
-  commitPlan((p) => { const x = findPart(p, partId).p; x.day = d; x.at = Date.now(); });
-  toast(`Moved to ${DAY_NAMES[d]}`);
+  let order = null;
+  if (same || before !== undefined) {
+    order = withInserted(f.g.week, d, partId, before ?? null);
+    if (same && order.join() === dayOrder(f.g.week, d).join()) return; // dropped where it was
+  }
+  commitPlan((p) => { const x = findPart(p, partId).p; x.day = d; x.at = Date.now(); if (order) orderDay(p, order); });
+  if (!same) toast(`Moved to ${DAY_NAMES[d]}`);
 }
 function removePart(partId, quiet) {
   const f = findPart(store.state.plan, partId);
@@ -334,8 +354,8 @@ function viewToday() {
   const parts = dayParts(s.plan, week, dow);
   const done = parts.filter((x) => partDone(wt, x.goal, x.part)).length;
   const d = s.plan.days[dow];
-  h += `<section class="card"><div class="card-head"><h2>Today</h2><span class="mono small muted">${parts.length ? `${done}/${parts.length}` : esc(d.hours)}</span></div>
-    ${parts.length ? `<ul class="parts">${parts.map((x) => partHTML(x, week)).join('')}</ul>`
+  h += `<section class="card" data-drop="day" data-day="${dow}"><div class="card-head"><h2>Today</h2><span class="mono small muted">${parts.length ? `${done}/${parts.length}` : esc(d.hours)}</span></div>
+    ${parts.length ? `<ul class="parts">${parts.map((x) => partHTML(x, week, { drag: parts.length > 1 })).join('')}</ul>`
       : `<p class="small muted">${goals.length ? 'Nothing is placed on today.' : 'No goals for this week yet.'}</p>
          <div class="row"><button type="button" class="btn" data-act="plan-open" data-which="this">${goals.length ? 'Open the plan' : 'Plan this week'}</button></div>`}
     ${d.classes.length ? `<p class="label">Classes</p><ul class="classes">${d.classes.map((c) => `<li><span class="ct">${esc(c.time)}</span>${sw(c.course)}<span>${esc(c.label)}</span></li>`).join('')}</ul>` : ''}
@@ -368,7 +388,7 @@ function viewPlan() {
   h += `<section class="card tray" data-drop="tray">
     <div class="card-head"><h2>Goals</h2><span class="small ${loose ? 'warn-text' : 'muted'}">${goals.length ? (loose ? `${loose} without a day` : 'all on a day') : ''}</span></div>
     ${goals.length ? `<ul class="goals">${goals.map((g) => goalHTML(g, w, { drag: true })).join('')}</ul>
-      <p class="small muted">Hold a goal and drag it to a day. Drag it again to split it over more days. Or tap it to pick the days.</p>`
+      <p class="small muted">Hold a goal and drag it to a day. Drag it again to split it over more days. Inside a day, drag items up or down to set their order.</p>`
       : '<p class="small muted">Write what you want done this week, like “Probability HW”. Then put each goal on one or more days.</p>'}
     ${usual.length ? `<div class="row"><button type="button" class="btn" data-act="usual">Put ${usual.length === 1 ? 'the repeating goal' : `${usual.length} repeating goals`} on ${usual.length === 1 ? 'its' : 'their'} usual days</button></div>` : ''}
     <div class="addgoal">
@@ -663,6 +683,19 @@ function dropTargetAt(x, y) {
   return el;
 }
 
+// Where in a day card's list the dragged item would go: in front of the first item
+// whose middle is below the finger, or at the end.
+function insertAt(card, y, skip) {
+  const list = card.querySelector('.parts');
+  for (const li of card.querySelectorAll('.parts > .part[data-id]')) {
+    if (li.dataset.id === skip) continue;
+    const r = li.getBoundingClientRect();
+    if (y < r.top + r.height / 2) return { el: li, before: li.dataset.id };
+  }
+  return { el: list, before: null };
+}
+function clearInsert() { for (const el of document.querySelectorAll('.ins-before, .ins-end')) el.classList.remove('ins-before', 'ins-end'); }
+
 function moveDrag(x, y) {
   const a = drag.active;
   a.x = x; a.y = y;
@@ -677,6 +710,11 @@ function moveDrag(x, y) {
     t?.classList.add('drop-on');
     a.target = t;
   }
+  // Inside a day card, a line shows where it will go. The strip of days adds to the end.
+  const ins = t?.dataset.drop === 'day' && t.classList.contains('card') ? insertAt(t, y, a.item) : null;
+  clearInsert();
+  if (ins?.el) ins.el.classList.add(ins.before ? 'ins-before' : 'ins-end');
+  a.before = ins ? ins.before : undefined;
 }
 
 // Scrolls the page when the finger is near the top, or just above the strip of days.
@@ -700,11 +738,13 @@ function endDrag(apply) {
   a.ghost.remove();
   a.src.classList.remove('drag-src');
   a.target?.classList.remove('drop-on');
+  clearInsert();
   document.body.classList.remove('dragging', 'drag-goal', 'drag-part');
   if (a.armed) drag.clickBlock = Date.now();
   const t = apply ? a.target : null;
   if (t) {
-    if (t.dataset.drop === 'day') (a.type === 'goal' ? placeGoal : movePart)(a.item, +t.dataset.day);
+    if (t.dataset.drop === 'day' && a.type === 'goal') placeGoal(a.item, +t.dataset.day, false, a.before);
+    else if (t.dataset.drop === 'day') movePart(a.item, +t.dataset.day, a.before);
     else if (a.type === 'part') removePart(a.item);
   }
   if (ui.pendingRender) render();
