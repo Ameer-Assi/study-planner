@@ -227,6 +227,8 @@ body.drag-part .dock-off { display: grid; }
 .lg-done { background: var(--sunk); border: 1.5px solid var(--line); }
 .lg-late { background: var(--warn-bg); border: 1.5px solid var(--warn); }
 .lg-loose { border: 1.5px dashed var(--muted); }
+.copyrow { flex-direction: row; align-items: center; gap: 12px; }
+.copyrow .btn { flex: none; }
 .goalsbar { flex-direction: row; align-items: center; justify-content: space-between; width: 100%; min-height: 48px; padding: 10px 14px; text-align: left; cursor: pointer; }
 .goalsbar .gb-t { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; min-width: 0; }
 .goalsbar b { font-size: 16px; font-weight: 600; }

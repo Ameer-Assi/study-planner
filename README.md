@@ -4,6 +4,7 @@ A phone app for planning the study week around goals. On Saturday you list what 
 
 - **Plan:** hold a goal and drag it to a day, or tap it and pick the days. Goals marked "Every week" come back each week, ready to place. The grid button shows the whole week as a timetable, with classes and goals by the hour.
 - **Today:** the parts placed on today, with a tick box each. Unticked parts from earlier days show as behind, and goals with no day are flagged. The Timeline switch shows the day by the hour.
+- **Copy a week:** on Next week, "Copy this week" puts every goal on the same days, at the same times and lengths, with nothing ticked.
 - **Times:** a goal's part can have a start time and a length, both optional. In a timeline, hold a part and drag it into a free gap, drag the bar at its bottom to change the length, or set both in the goal's sheet. Each class has a length too, set in Settings.
 - **Reminders:** a morning summary and an evening nudge. On Saturday they also say if next week isn't planned.
 

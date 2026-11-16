@@ -232,6 +232,33 @@ export function usualSlots(plan, g) {
   return slots.filter((x) => !seen.has(x.day) && seen.add(x.day)).sort((a, b) => a.day - b.day);
 }
 
+// Copies one week's plan into another: every goal on the same days, at the same times and
+// lengths, with the same notes. Nothing comes across ticked, since the parts get new ids.
+// Repeating goals fill their entry in the target week. Other goals get a copy, which a later
+// copy updates instead of duplicating. Goals only in the target week are left alone.
+// Returns the target goals that were filled in.
+export function copyWeek(plan, from, to, newId) {
+  const out = [];
+  for (const g of weekGoals(plan, from)) {
+    const parts = sortedParts(g).map((p) => ({ id: newId(), day: p.day, note: p.note || '', at: p.at, ...(hasTime(p) ? { start: p.start, mins: partMins(p) } : {}) }));
+    const r = repeatOf(plan, g);
+    let t;
+    if (r && r.since <= to) {
+      const id = instanceId(r.id, to);
+      t = plan.goals.find((x) => x.id === id);
+      if (!t) { t = { id, title: r.title, course: r.course, week: to, repeatId: r.id, parts: [] }; plan.goals.push(t); }
+    } else {
+      t = plan.goals.find((x) => x.week === to && x.copiedFrom === g.id);
+      if (!t) { t = { id: newId(), title: g.title, course: g.course, week: to, parts: [], copiedFrom: g.id }; plan.goals.push(t); }
+      t.title = g.title; t.course = g.course;
+    }
+    delete t.deleted;
+    t.parts = parts;
+    out.push(t.id);
+  }
+  return out;
+}
+
 // Goals older than this many weeks are dropped from the saved plan.
 export const KEEP_WEEKS = 6;
 export function pruneGoals(plan, week) {

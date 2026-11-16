@@ -1,11 +1,11 @@
 import {
   COURSES, TRACKED, DAY_NAMES, DEFAULT_PLAN, DEFAULT_SETTINGS, nowLocal, addDays, weekOf, fmtShortDate, guessCourse,
   migratePlan, renameCourses, ensureWeek, pruneGoals, weekGoals, repeatOf, sortedParts, goalDone, partDone, dayParts, lateParts,
-  unplacedGoals, planningLeft, usualDays, usualSlots,
+  unplacedGoals, planningLeft, usualDays, usualSlots, copyWeek,
   DAY_START, DAY_END, toMin, fmtMin, fmtSpan, classMins, partMins, hasTime,
 } from './shared.js';
 
-const VERSION = '2.3.1';
+const VERSION = '2.4.0';
 // Preview mode: runs without a server and keeps everything on this device.
 const DEMO = !!globalThis.PLANNER_DEMO;
 const PRE = DEMO ? 'spd-' : 'sp-';
@@ -337,6 +337,23 @@ function goalHTML(g, week, opts = {}) {
   </li>`;
 }
 
+// On next week: copy this week's plan across, same days, times and lengths, nothing ticked.
+function copyWeekHTML(next) {
+  const s = store.state;
+  const from = addDays(next, -7);
+  const src = weekGoals(s.plan, from);
+  if (!src.length) return '';
+  const placed = weekGoals(s.plan, next).filter((g) => g.parts.length).length;
+  if (ui.confirm === 'copy-week') {
+    return `<section class="card callout"><h2>Copy this week’s plan?</h2>
+      <p class="small">${plural(placed, 'goal')} already ${placed === 1 ? 'has' : 'have'} days next week. Goals that are in both weeks get this week’s days and times instead. Goals only in next week stay as they are.</p>
+      <div class="row"><button type="button" class="btn primary" data-act="copy-week-go">Copy and replace</button><button type="button" class="btn ghost" data-act="cancel-confirm">Cancel</button></div></section>`;
+  }
+  return `<section class="card copyrow"><div class="grow"><h2>Same as this week?</h2>
+      <p class="small muted">Copies ${plural(src.length, 'goal')} with the same days, times and lengths. Nothing comes across ticked.</p></div>
+    <button type="button" class="btn" data-act="${placed ? 'confirm' : 'copy-week-go'}" data-key="copy-week">Copy this week</button></section>`;
+}
+
 // Goals from last week that weren't finished: move what's left into this week, or drop it.
 function leftoversHTML() {
   const s = store.state;
@@ -428,6 +445,7 @@ function viewPlan() {
     <button type="button" aria-pressed="${!grid}" aria-label="Day cards" data-act="plan-view" data-v="list">${ICON_LIST}</button>
     <button type="button" aria-pressed="${grid}" aria-label="Week grid" data-act="plan-view" data-v="grid">${ICON_GRID}</button></div></div>`;
   if (which === 'this') h += leftoversHTML();
+  else h += copyWeekHTML(w);
 
   const tray = `<section class="card tray" data-drop="tray">
     <div class="card-head"><h2>Goals</h2><span class="small ${loose ? 'warn-text' : 'muted'}">${goals.length ? (loose ? `${loose} without a day` : 'all on a day') : ''}</span></div>
@@ -1190,6 +1208,18 @@ document.addEventListener('click', async (e) => {
     }
 
     case 'goal-add': addGoal(); break;
+    case 'copy-week-go': {
+      const to = planWeek(), from = addDays(to, -7);
+      let filled = [];
+      ui.confirm = null;
+      commitPlan((p) => { filled = copyWeek(p, from, to, uid); });
+      // A goal marked done as a whole in next week starts open again.
+      const wt = store.state.ticks[to] || {};
+      const open = filled.filter((id) => wt[id]?.done).map((id) => tickOp(to, id, false));
+      if (open.length) commit(...open);
+      toast(`Copied ${plural(filled.length, 'goal')} to next week`);
+      break;
+    }
     case 'goal-day': {
       const g = findGoal(s.plan, el.dataset.id); if (!g) break;
       const d = +el.dataset.day;
