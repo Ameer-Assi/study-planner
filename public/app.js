@@ -4,10 +4,10 @@ import {
   unplacedGoals, planningLeft, usualDays, usualSlots, copyWeek,
   DAY_START, DAY_END, toMin, fmtMin, fmtSpan, classMins, partMins, hasTime,
   TASKS, taskGoalId, qKey, allTasks, findTask, taskDone, taskGoals, taskProgress, openTasks, dueLabel, tasksToPlan, taskWarnings,
-  MAX_QUESTIONS, daysBetween,
+  MAX_QUESTIONS, daysBetween, qsLabel, partNote,
 } from './shared.js';
 
-const VERSION = '2.5.0';
+const VERSION = '2.6.0';
 // Preview mode: runs without a server and keeps everything on this device.
 const DEMO = !!globalThis.PLANNER_DEMO;
 const PRE = DEMO ? 'spd-' : 'sp-';
@@ -266,6 +266,38 @@ function placeGoalAt(goalId, d, start) {
   toast(`${g.title}: ${short(d)} ${fmtSpan(start, start + 60)}`);
 }
 
+// Homework dropped on a day of the week being planned: it joins that week (if it isn't in it
+// yet) and goes on that day, at `start` when dropped on an hour.
+function placeTask(taskId, d, before, start) {
+  const t = findTask(store.state.plan, taskId);
+  if (!t) return;
+  const w = planWeek();
+  const gid = taskGoalId(t.id, w);
+  const pid = uid();
+  const order = before === undefined ? null : withInserted(w, d, pid, before);
+  commitPlan((p) => {
+    let g = findGoal(p, gid);
+    if (!g) { g = { id: gid, title: t.title, course: t.course, week: w, taskId: t.id, parts: [] }; p.goals.push(g); }
+    delete g.deleted;
+    const there = g.parts.find((x) => x.day === d);
+    if (there) { if (start != null) there.start = start; return; }
+    g.parts.push({ id: pid, day: d, note: '', at: Date.now(), ...(start != null ? { start } : {}) });
+    if (order) orderDay(p, order);
+  });
+  toast(`${t.title}: ${DAY_NAMES[d]}${start != null ? ` ${fmtSpan(start, start + 60)}` : ''}. Tap it to pick its questions.`);
+}
+
+// Spreads the questions not done yet over the homework's days in this week, in day order.
+function splitQuestions(p, goalId) {
+  const g = findGoal(p, goalId); const t = g && findTask(p, g.taskId);
+  if (!t || !g.parts.length) return;
+  const tt = tticks();
+  const left = taskProgress(tt, t).of ? Array.from({ length: t.questions }, (_, i) => i + 1).filter((i) => !tt[qKey(t, i)]?.done) : [];
+  const parts = sortedParts(g);
+  const per = Math.ceil(left.length / parts.length);
+  parts.forEach((x, i) => { x.qs = left.slice(i * per, (i + 1) * per); });
+}
+
 function addGoal() {
   const input = document.getElementById('g-title');
   const title = (input?.value || '').trim();
@@ -329,7 +361,8 @@ function partHTML(x, week, opts = {}) {
   const done = partDone(wt, g, p);
   const task = findTask(store.state.plan, g.taskId);
   const soon = task && !taskDone(tticks(), task) && daysBetween(clock().today, task.due) <= 6;
-  const tags = `${soon ? dueTag(task) : ''}${hasTime(p) ? `<span class="tag time">${fmtSpan(p.start, p.start + partMins(p))}</span>` : ''}${x.of > 1 ? `<span class="tag">part ${x.n} of ${x.of}</span>` : ''}${opts.late && !done ? `<span class="tag late">${opts.from != null ? esc(short(opts.from)) : 'late'}</span>` : ''}`;
+  const qs = task && p.qs?.length ? `<span class="tag qs">${esc(qsLabel(p.qs))}</span>` : '';
+  const tags = `${qs}${soon ? dueTag(task) : ''}${hasTime(p) ? `<span class="tag time">${fmtSpan(p.start, p.start + partMins(p))}</span>` : ''}${x.of > 1 ? `<span class="tag">part ${x.n} of ${x.of}</span>` : ''}${opts.late && !done ? `<span class="tag late">${opts.from != null ? esc(short(opts.from)) : 'late'}</span>` : ''}`;
   return `<li class="part${done ? ' done' : ''}"${opts.drag ? ` data-drag="part" data-id="${esc(p.id)}"` : ''}>
     ${opts.drag ? GRIP : ''}
     <input type="checkbox" class="check" id="chk-${esc(p.id)}" data-act="tick" data-week="${esc(week)}" data-item="${esc(p.id)}" data-goal="${esc(g.id)}"${done ? ' checked' : ''} aria-label="${esc(g.title)}${p.note ? ', ' + esc(p.note) : ''}">
@@ -352,7 +385,7 @@ function goalHTML(g, week, opts = {}) {
     ${opts.drag ? GRIP : ''}
     <button type="button" class="goal-body" data-act="open-goal" data-id="${esc(g.id)}">
       <span class="t">${sw(g.course)}<span>${esc(g.title)}</span>${repeatOf(s.plan, g) ? ICON_REPEAT : ''}</span>
-      <span class="goal-sub">${dotsHTML(g, wt)}${done ? '<span class="tag ok">done</span>' : loose ? '<span class="tag warn">no day yet</span>' : ''}${task && !taskDone(tticks(), task) ? dueTag(task) : ''}</span>
+      <span class="goal-sub">${dotsHTML(g, wt)}${done ? '<span class="tag ok">done</span>' : loose ? '<span class="tag warn">no day yet</span>' : ''}${task && !taskDone(tticks(), task) ? dueTag(task) + progHTML(task) : ''}</span>
     </button>
   </li>`;
 }
@@ -425,6 +458,19 @@ function taskRowHTML(t, week) {
       ${warnsHTML(warns)}
     </button>
     ${canAdd ? `<button type="button" class="btn small-btn" data-act="task-week" data-id="${esc(t.id)}" data-week="${esc(week)}">Add to week</button>` : ''}
+  </li>`;
+}
+
+// Homework not in the week yet, in the Goals tray. Drag it onto a day to add it.
+function taskTrayHTML(t) {
+  const warns = taskWarnings(store.state.plan, store.state.ticks, t, clock().today);
+  return `<li class="goal task out" data-drag="task" data-id="${esc(t.id)}">
+    ${GRIP}
+    <button type="button" class="goal-body" data-act="open-task" data-id="${esc(t.id)}">
+      <span class="t">${sw(t.course)}<span>${esc(t.title)}</span></span>
+      <span class="goal-sub">${dueTag(t)}${progHTML(t)}<span class="tag">not in this week</span></span>
+      ${warnsHTML(warns)}
+    </button>
   </li>`;
 }
 
@@ -605,10 +651,30 @@ function viewPlan() {
   if (which === 'this') h += leftoversHTML();
   else h += copyWeekHTML(w);
 
+  // Homework first: every open one due this week or later, ready to drag onto a day. Dragging
+  // one that isn't in this week yet adds it. Then the other goals.
+  const tt = tticks();
+  const hwGoals = goals.filter((g) => g.taskId);
+  const plain = goals.filter((g) => !g.taskId);
+  const hwOpen = openTasks(s.plan, tt).filter((t) => t.due >= w || hwGoals.some((g) => g.taskId === t.id));
+  const hwRows = [
+    ...hwOpen.map((t) => { const g = hwGoals.find((x) => x.taskId === t.id); return g ? goalHTML(g, w, { drag: true }) : taskTrayHTML(t); }),
+    ...hwGoals.filter((g) => !hwOpen.some((t) => t.id === g.taskId)).map((g) => goalHTML(g, w, { drag: true })),
+  ];
+  const handedIn = allTasks(s.plan).filter((t) => taskDone(tt, t) && t.due >= addDays(today, -14)).sort((a, b) => (a.due < b.due ? 1 : -1));
+  const outside = hwOpen.filter((t) => !hwGoals.some((g) => g.taskId === t.id)).length;
+  const headStatus = [loose ? `${loose} without a day` : goals.length ? 'all on a day' : '', outside ? `${outside} homework not in the week` : ''].filter(Boolean).join(' · ');
   const tray = `<section class="card tray" data-drop="tray">
-    <div class="card-head"><h2>Goals</h2><span class="small ${loose ? 'warn-text' : 'muted'}">${goals.length ? (loose ? `${loose} without a day` : 'all on a day') : ''}</span></div>
-    ${goals.length ? `<ul class="goals">${goals.map((g) => goalHTML(g, w, { drag: true })).join('')}</ul>
-      <p class="small muted">${grid ? 'Hold a goal and drag it onto an hour in the grid, or onto a day in the strip at the bottom.' : 'Hold a goal and drag it to a day. Drag it again to split it over more days. Inside a day, drag items up or down to set their order.'}</p>`
+    <div class="card-head"><h2>Goals</h2><span class="small ${loose || outside ? 'warn-text' : 'muted'}">${esc(headStatus)}</span></div>
+    <div class="row between sect"><p class="label">Homework</p><div class="row tight">
+      ${handedIn.length ? `<button type="button" class="btn ghost" data-act="done-toggle">${ui.doneOpen ? 'Hide' : 'Handed in'} (${handedIn.length})</button>` : ''}
+      ${ui.taskForm ? '' : '<button type="button" class="btn ghost" data-act="task-new">Add homework</button>'}</div></div>
+    ${hwRows.length ? `<ul class="goals">${hwRows.join('')}</ul>` : '<p class="small muted">No open homework. Add it when it’s published, with its due date.</p>'}
+    ${ui.taskForm ? taskFormHTML() : ''}
+    ${ui.doneOpen && handedIn.length ? `<ul class="goals">${handedIn.map((t) => taskRowHTML(t, null)).join('')}</ul>` : ''}
+    <p class="label sect">Other goals</p>
+    ${plain.length ? `<ul class="goals">${plain.map((g) => goalHTML(g, w, { drag: true })).join('')}</ul>` : ''}
+    ${goals.length || hwRows.length ? `<p class="small muted">${grid ? 'Hold a goal or homework and drag it onto an hour in the grid, or onto a day in the strip at the bottom.' : 'Hold a goal or homework and drag it to a day. Drag it again to split it over more days, then tap it to give each day its questions.'}</p>`
       : '<p class="small muted">Write what you want done this week, like “Probability HW”. Then put each goal on one or more days.</p>'}
     ${usual.length ? `<div class="row"><button type="button" class="btn" data-act="usual">Put ${usual.length === 1 ? 'the repeating goal' : `${usual.length} repeating goals`} on ${usual.length === 1 ? 'its' : 'their'} usual days</button></div>` : ''}
     <div class="addgoal">
@@ -630,7 +696,6 @@ function viewPlan() {
     // The week grid needs the room, so the goals fold into one line until asked for.
     const untimed = goals.reduce((n, g) => n + g.parts.filter((p) => !hasTime(p) && !partDone(wt, g, p)).length, 0);
     const status = !goals.length ? 'none yet' : loose ? `${loose} without a day` : untimed ? `${untimed} without a time` : 'all have a time';
-    if (ui.goalsOpen || !goals.length) h += deadlinesHTML(w, false);
     h += ui.goalsOpen || !goals.length ? tray
       : `<button type="button" class="card goalsbar" data-act="goals-toggle" aria-expanded="false"><span class="gb-t"><b>Goals</b><span class="small ${loose ? 'warn-text' : 'muted'}">${goals.length} this week · ${status}</span></span>${ICON_DOWN}</button>`;
     if (ui.planDay != null) {
@@ -641,7 +706,6 @@ function viewPlan() {
       h += dayTimelineHTML(w, d, `${DAY_NAMES[d]} <span class="mono small muted">${esc(fmtShortDate(addDays(w, d)))}</span>${addDays(w, d) === today ? ' <span class="tag now">today</span>' : ''}`);
     } else h += weekGridHTML(w);
   } else {
-    h += deadlinesHTML(w, false);
     h += tray;
     h += s.plan.days.map((d, i) => {
       const date = addDays(w, i);
@@ -740,7 +804,7 @@ function colHTML(week, d, ev, t0, t1, pm, mini) {
         <button type="button" class="ev-body" data-act="open-goal" data-id="${esc(g.id)}" data-part="${esc(p.id)}" aria-label="${said}">${e.done ? ICON_TICK : ''}<span class="ev-code">${esc(codeOf(g))}</span>${e.late ? '<span class="ev-late">late</span>' : ''}</button></div>`;
       continue;
     }
-    const sub = [e.x.of > 1 ? `part ${e.x.n} of ${e.x.of}` : '', e.late ? 'late' : '', p.note].filter(Boolean).join(' · ');
+    const sub = [e.x.of > 1 ? `part ${e.x.n} of ${e.x.of}` : '', e.late ? 'late' : '', partNote(p)].filter(Boolean).join(' · ');
     h += `<div class="ev goal${state}${size}" data-drag="part" data-id="${esc(p.id)}" style="${pos};--c:${cvar(g.course)}">
       <input type="checkbox" class="check" data-act="tick" data-week="${esc(week)}" data-item="${esc(p.id)}" data-goal="${esc(g.id)}"${e.done ? ' checked' : ''} aria-label="${said}">
       <button type="button" class="ev-body" data-act="open-goal" data-id="${esc(g.id)}" data-part="${esc(p.id)}">
@@ -782,7 +846,7 @@ function dayTimelineHTML(week, d, title) {
       ${loose.length ? `<ul class="chips">${loose.map((x) => {
         const { goal: g, part: p } = x;
         const isDone = partDone(wt, g, p);
-        const sub = [x.of > 1 ? `part ${x.n} of ${x.of}` : '', !isDone && week === thisWeek && d < dow ? 'late' : '', p.note].filter(Boolean).join(' · ');
+        const sub = [x.of > 1 ? `part ${x.n} of ${x.of}` : '', !isDone && week === thisWeek && d < dow ? 'late' : '', partNote(p)].filter(Boolean).join(' · ');
         return `<li class="chip${isDone ? ' done' : ''}" data-drag="part" data-id="${esc(p.id)}">
           <input type="checkbox" class="check" data-act="tick" data-week="${esc(week)}" data-item="${esc(p.id)}" data-goal="${esc(g.id)}"${isDone ? ' checked' : ''} aria-label="${esc(g.title)}${p.note ? ', ' + esc(p.note) : ''}">
           <button type="button" class="chip-body" data-act="open-goal" data-id="${esc(g.id)}" data-part="${esc(p.id)}"><span class="t">${sw(g.course)}<span>${esc(g.title)}</span></span>${sub ? `<span class="chip-s">${esc(sub)}</span>` : ''}</button>
@@ -859,9 +923,11 @@ function sheetHTML() {
       <div class="daypick" role="group" aria-label="Days for this goal">${DAY_NAMES.map((n, d) =>
         `<button type="button" class="seg" data-act="goal-day" data-id="${id}" data-day="${d}" aria-pressed="${g.parts.some((p) => p.day === d)}">${n.slice(0, 3)}</button>`).join('')}</div>
       <p class="small muted">${parts.length ? 'Pick more days to split the goal between them.' : 'Pick one day, or several to split the goal between them.'}</p></div>
+    ${task && parts.length > 1 && task.questions ? `<div class="row between"><span class="small muted">Give each day its questions, or</span><button type="button" class="btn" data-act="qs-split" data-id="${id}">Split questions evenly</button></div>` : ''}
     ${parts.map((p) => `<div class="partbox">
       <label class="field"><span>${DAY_NAMES[p.day]}${partDone(wt, g, p) ? ' · done' : ''}</span>
-        <input type="text" id="note-${esc(p.id)}" data-act="part-note" data-id="${esc(p.id)}" value="${esc(p.note)}" placeholder="Note for this day, like “questions 1–3”" autocomplete="off"></label>
+        <input type="text" id="note-${esc(p.id)}" data-act="part-note" data-id="${esc(p.id)}" value="${esc(p.note)}" placeholder="${task && task.questions ? 'Note for this day' : 'Note for this day, like “questions 1–3”'}" autocomplete="off"></label>
+      ${task && task.questions ? partQsHTML(g, p, task) : ''}
       <div class="row">
         <label class="field"><span>Starts at</span><input type="time" id="st-${esc(p.id)}" data-act="part-start" data-id="${esc(p.id)}" value="${hasTime(p) ? esc(padTime(fmtMin(p.start))) : ''}"></label>
         <label class="field"><span>For</span><select id="ln-${esc(p.id)}" data-act="part-mins" data-id="${esc(p.id)}">${lenOptions(partMins(p), PART_LENS)}</select></label>
@@ -879,6 +945,19 @@ function sheetHTML() {
       <div class="row tight">${del}</div>
     </div>
   </section>`;
+}
+
+// The questions planned for one day of a homework. A question can be on one day only:
+// picking it here takes it off another day. Ticked questions show as done.
+function partQsHTML(g, p, t) {
+  const tt = tticks();
+  const mine = new Set(p.qs || []);
+  const elsewhere = new Map();
+  for (const x of g.parts) if (x.id !== p.id) for (const q of x.qs || []) elsewhere.set(q, short(x.day));
+  return `<div class="field"><span>Questions this day${mine.size ? ` · ${esc(qsLabel([...mine]))}` : ''}</span><div class="qgrid" role="group" aria-label="Questions for ${DAY_NAMES[p.day]}">${Array.from({ length: Math.min(MAX_QUESTIONS, t.questions) }, (_, i) => {
+    const q = i + 1; const on = mine.has(q); const other = elsewhere.get(q); const done = !!tt[qKey(t, q)]?.done;
+    return `<button type="button" class="seg${done ? ' qdone' : ''}${other ? ' qother' : ''}" data-act="part-q" data-id="${esc(p.id)}" data-q="${q}" aria-pressed="${on}" aria-label="Question ${q}${on ? `, on ${DAY_NAMES[p.day]}` : other ? `, on ${other}` : ''}${done ? ', done' : ''}">Q${q}${other && !on ? `<small>${esc(other)}</small>` : ''}</button>`;
+  }).join('')}</div></div>`;
 }
 
 // ---------- Classes and hours ----------
@@ -1130,7 +1209,7 @@ function startDrag(x, y) {
   if (!p || !p.src.isConnected || !store.state) return;
   const type = p.src.dataset.drag, item = p.src.dataset.id;
   const part = type === 'part' ? findPart(store.state.plan, item) : null;
-  const g = part ? part.g : findGoal(store.state.plan, item);
+  const g = part ? part.g : type === 'task' ? findTask(store.state.plan, item) : findGoal(store.state.plan, item);
   if (!g) return;
   const ghost = document.createElement('div');
   ghost.className = 'drag-ghost'; ghost.innerHTML = `<span class="t">${sw(g.course)}<span>${esc(g.title)}</span></span><span class="g-time"></span>`;
@@ -1229,12 +1308,13 @@ function endDrag(apply) {
   a.src.classList.remove('drag-src');
   a.target?.classList.remove('drop-on');
   clearInsert();
-  document.body.classList.remove('dragging', 'drag-goal', 'drag-part');
+  document.body.classList.remove('dragging', 'drag-goal', 'drag-part', 'drag-task');
   if (a.armed) drag.clickBlock = Date.now();
   const t = apply ? a.target : null;
   if (t) {
     const kind = t.dataset.drop, d = +t.dataset.day;
-    if (kind === 'time') { if (a.start != null) { if (a.type === 'goal') placeGoalAt(a.item, d, a.start); else setPartTime(a.item, d, a.start); } }
+    if (kind === 'time') { if (a.start != null) { if (a.type === 'task') placeTask(a.item, d, undefined, a.start); else if (a.type === 'goal') placeGoalAt(a.item, d, a.start); else setPartTime(a.item, d, a.start); } }
+    else if (kind === 'day' && a.type === 'task') placeTask(a.item, d, a.before);
     else if (kind === 'untime') setPartTime(a.item, d, null);
     else if (kind === 'day' && a.type === 'goal') placeGoal(a.item, d, false, a.before);
     else if (kind === 'day') movePart(a.item, d, a.before);
@@ -1363,6 +1443,24 @@ document.addEventListener('click', async (e) => {
         else p.goals.push({ id: gid, title: t.title, course: t.course, week: w, taskId: t.id, parts: [] });
       });
       toast(`${t.title}: in ${weekName(w).toLowerCase()}. Put it on days.`);
+      break;
+    }
+    case 'part-q': {
+      const f = findPart(s.plan, el.dataset.id); if (!f) break;
+      const q = +el.dataset.q;
+      commitPlan((p) => {
+        const { g, p: x } = findPart(p, f.p.id);
+        const had = (x.qs || []).includes(q);
+        for (const y of g.parts) y.qs = (y.qs || []).filter((n) => n !== q);
+        if (!had) x.qs.push(q);
+        for (const y of g.parts) { y.qs.sort((a, b) => a - b); if (!y.qs.length) delete y.qs; }
+      });
+      break;
+    }
+    case 'qs-split': {
+      const id = el.dataset.id;
+      commitPlan((p) => splitQuestions(p, id));
+      toast('Questions spread over the days');
       break;
     }
     case 'task-q': {
@@ -1553,6 +1651,10 @@ document.addEventListener('change', (e) => {
     // The goal was marked done as a whole: unticking one day keeps the other days ticked.
     if (g && !el.checked && wt[g.id]?.done) ops.push(tickOp(week, g.id, false), ...g.parts.filter((p) => p.id !== item).map((p) => tickOp(week, p.id, true)));
     ops.push(tickOp(week, item, el.checked));
+    // A homework day with questions: ticking it ticks them too (and unticking unticks them).
+    const f = findPart(s.plan, item);
+    const task = g && findTask(s.plan, g.taskId);
+    if (task && f?.p.qs?.length) for (const q of f.p.qs) if (q <= (task.questions || 0)) ops.push(tickOp(TASKS, qKey(task, q), el.checked));
     commit(...ops);
     if (el.checked && g && !was && goalDone(store.state.ticks[week], g)) toast(g.parts.length > 1 ? `${g.title}: all ${g.parts.length} parts done` : `${g.title}: done`);
   } else if (act === 'add-course') {

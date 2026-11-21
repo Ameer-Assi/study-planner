@@ -327,3 +327,14 @@ body.has-sheet .toast { bottom: auto; top: calc(env(safe-area-inset-top, 0px) + 
 .qgrid .seg { padding: 8px 0; font-size: 13px; text-align: center; font-family: var(--mono); }
 .hwbox { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; display: flex; flex-direction: column; gap: 10px; }
 .goal-sub.nopad { padding-left: 0; }
+
+.tray .sect { margin-top: 4px; }
+p.label.sect { margin-bottom: -4px; }
+.task.out { opacity: .92; }
+.task.out .goal-body { border-left: 0; }
+.tag.qs { border-style: solid; border-color: var(--fg); color: var(--fg); font-family: var(--mono); }
+.qgrid .seg { position: relative; }
+.qgrid .seg.qother:not([aria-pressed="true"]) { border-style: dashed; }
+.qgrid .seg small { display: block; font-size: 9px; line-height: 1; margin-top: 1px; font-family: var(--sans, inherit); }
+.qgrid .seg.qdone:not([aria-pressed="true"]) { text-decoration: line-through; }
+.qgrid .seg.qdone[aria-pressed="true"] { text-decoration: line-through; }

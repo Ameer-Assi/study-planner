@@ -61,7 +61,8 @@ export function guessCourse(title) {
 //   plan.repeats   goals that come back every week: { id, title, course, since, usual }
 //   plan.goals     one entry per goal per week: { id, title, course, week, repeatId?, taskId?, parts, deleted? }
 //   plan.tasks     homework with a due date, worked on over one or more weeks (see the end of this file)
-//   goal.parts     the days a goal is placed on: { id, day, note, at, start?, mins? }. Several parts = split.
+//   goal.parts     the days a goal is placed on: { id, day, note, at, start?, mins?, qs? }. Several parts = split.
+//                  `qs` (homework only): the question numbers planned for that day.
 //   class          { id, time, course, label, mins }
 // Ticks are stored per week by id: a part's id, or the goal's id for "whole goal done".
 export const PLAN_VERSION = 2;
@@ -276,7 +277,21 @@ export function pruneGoals(plan, week) {
   if (plan.tasks) plan.tasks = plan.tasks.filter((t) => t.due >= oldest);
 }
 
-export const partLabel = (x) => (x.part.note ? `${x.goal.title} (${x.part.note})` : x.goal.title);
+// Questions given to one day of a homework, as "Q1–2, Q5".
+export function qsLabel(qs) {
+  const n = [...new Set(qs || [])].sort((a, b) => a - b);
+  const out = [];
+  for (let i = 0; i < n.length; i++) {
+    let j = i;
+    while (j + 1 < n.length && n[j + 1] === n[j] + 1) j++;
+    out.push(j > i ? `Q${n[i]}–${n[j]}` : `Q${n[i]}`);
+    i = j;
+  }
+  return out.join(', ');
+}
+// What a part is about: its questions and its note.
+export const partNote = (p) => [qsLabel(p.qs), p.note].filter(Boolean).join(' · ');
+export const partLabel = (x) => (partNote(x.part) ? `${x.goal.title} (${partNote(x.part)})` : x.goal.title);
 
 // ---------- Homework with a due date ----------
 //   plan.tasks   { id, title, course, due: 'YYYY-MM-DD', questions: n (0 = no checklist), created }
