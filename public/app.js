@@ -287,6 +287,55 @@ function placeTask(taskId, d, before, start) {
   toast(`${t.title}: ${DAY_NAMES[d]}${start != null ? ` ${fmtSpan(start, start + 60)}` : ''}. Tap it to pick its questions.`);
 }
 
+// The days the last homework of the same course was put on (with their times and lengths),
+// over every week it was worked on. Only days in week `w` that are still ahead and on or
+// before this homework's due date are kept.
+function lastLayout(t, w) {
+  const plan = store.state.plan;
+  if (!t.course) return null;
+  let prev = null, latest = '';
+  for (const g of plan.goals) {
+    if (!g.taskId || g.taskId === t.id || g.deleted || !g.parts.length) continue;
+    if ((findTask(plan, g.taskId)?.course ?? g.course) !== t.course) continue;
+    if (g.week > latest) { latest = g.week; prev = g.taskId; }
+  }
+  if (!prev) return null;
+  const { today } = clock();
+  const seen = new Map();
+  for (const g of plan.goals.filter((x) => x.taskId === prev && !x.deleted).sort((a, b) => (a.week < b.week ? -1 : 1))) {
+    for (const p of sortedParts(g)) if (!seen.has(p.day)) seen.set(p.day, { day: p.day, ...(hasTime(p) ? { start: p.start, mins: partMins(p) } : {}) });
+  }
+  const slots = [...seen.values()].sort((a, b) => a.day - b.day).filter((x) => { const d = addDays(w, x.day); return d >= today && d <= t.due; });
+  const from = findTask(plan, prev)?.title || plan.goals.find((g) => g.taskId === prev)?.title || 'last time';
+  return slots.length ? { slots, from } : null;
+}
+function sameDaysBtn(t, w, g) {
+  if (taskDone(tticks(), t) || (g && g.parts.length)) return '';
+  const l = lastLayout(t, w);
+  if (!l) return '';
+  const days = l.slots.map((x) => short(x.day));
+  return `<button type="button" class="btn small-btn" data-act="task-layout" data-id="${esc(t.id)}" data-week="${esc(w)}" aria-label="Put on ${esc(andList(days))}, like ${esc(l.from)}">${esc(days.join(' + '))}</button>`;
+}
+// Puts homework on the same days as the last one from its course, and spreads its questions.
+function placeLayout(taskId, w) {
+  const t = findTask(store.state.plan, taskId);
+  const l = t && lastLayout(t, w);
+  if (!l) return;
+  const gid = taskGoalId(t.id, w);
+  const now = Date.now();
+  commitPlan((p) => {
+    let g = findGoal(p, gid);
+    if (!g) { g = { id: gid, title: t.title, course: t.course, week: w, taskId: t.id, parts: [] }; p.goals.push(g); }
+    delete g.deleted;
+    l.slots.forEach((x, i) => {
+      if (g.parts.some((q) => q.day === x.day)) return;
+      g.parts.push({ id: uid() + i, day: x.day, note: '', at: now + i, ...(x.start != null ? { start: x.start, mins: x.mins } : {}) });
+    });
+    if (t.questions) splitQuestions(p, gid);
+  });
+  toast(`${t.title}: ${andList(l.slots.map((x) => short(x.day)))}, like ${l.from}`);
+}
+
 // Spreads the questions not done yet over the homework's days in this week, in day order.
 function splitQuestions(p, goalId) {
   const g = findGoal(p, goalId); const t = g && findTask(p, g.taskId);
@@ -387,6 +436,7 @@ function goalHTML(g, week, opts = {}) {
       <span class="t">${sw(g.course)}<span>${esc(g.title)}</span>${repeatOf(s.plan, g) ? ICON_REPEAT : ''}</span>
       <span class="goal-sub">${dotsHTML(g, wt)}${done ? '<span class="tag ok">done</span>' : loose ? '<span class="tag warn">no day yet</span>' : ''}${task && !taskDone(tticks(), task) ? dueTag(task) + progHTML(task) : ''}</span>
     </button>
+    ${task && opts.drag ? sameDaysBtn(task, week, g) : ''}
   </li>`;
 }
 
@@ -462,7 +512,7 @@ function taskRowHTML(t, week) {
 }
 
 // Homework not in the week yet, in the Goals tray. Drag it onto a day to add it.
-function taskTrayHTML(t) {
+function taskTrayHTML(t, w) {
   const warns = taskWarnings(store.state.plan, store.state.ticks, t, clock().today);
   return `<li class="goal task out" data-drag="task" data-id="${esc(t.id)}">
     ${GRIP}
@@ -471,6 +521,7 @@ function taskTrayHTML(t) {
       <span class="goal-sub">${dueTag(t)}${progHTML(t)}<span class="tag">not in this week</span></span>
       ${warnsHTML(warns)}
     </button>
+    ${sameDaysBtn(t, w)}
   </li>`;
 }
 
@@ -658,7 +709,7 @@ function viewPlan() {
   const plain = goals.filter((g) => !g.taskId);
   const hwOpen = openTasks(s.plan, tt).filter((t) => t.due >= w || hwGoals.some((g) => g.taskId === t.id));
   const hwRows = [
-    ...hwOpen.map((t) => { const g = hwGoals.find((x) => x.taskId === t.id); return g ? goalHTML(g, w, { drag: true }) : taskTrayHTML(t); }),
+    ...hwOpen.map((t) => { const g = hwGoals.find((x) => x.taskId === t.id); return g ? goalHTML(g, w, { drag: true }) : taskTrayHTML(t, w); }),
     ...hwGoals.filter((g) => !hwOpen.some((t) => t.id === g.taskId)).map((g) => goalHTML(g, w, { drag: true })),
   ];
   const handedIn = allTasks(s.plan).filter((t) => taskDone(tt, t) && t.due >= addDays(today, -14)).sort((a, b) => (a.due < b.due ? 1 : -1));
@@ -674,7 +725,7 @@ function viewPlan() {
     ${ui.doneOpen && handedIn.length ? `<ul class="goals">${handedIn.map((t) => taskRowHTML(t, null)).join('')}</ul>` : ''}
     <p class="label sect">Other goals</p>
     ${plain.length ? `<ul class="goals">${plain.map((g) => goalHTML(g, w, { drag: true })).join('')}</ul>` : ''}
-    ${goals.length || hwRows.length ? `<p class="small muted">${grid ? 'Hold a goal or homework and drag it onto an hour in the grid, or onto a day in the strip at the bottom.' : 'Hold a goal or homework and drag it to a day. Drag it again to split it over more days, then tap it to give each day its questions.'}</p>`
+    ${goals.length || hwRows.length ? `<p class="small muted">${grid ? 'Hold a goal or homework and drag it onto an hour in the grid, or onto a day in the strip at the bottom.' : 'Hold a goal or homework and drag it to a day. Drag it again to split it over more days, then tap it to give each day its questions. A day button like “Sun + Thu” puts homework on the same days as the last one from that course.'}</p>`
       : '<p class="small muted">Write what you want done this week, like “Probability HW”. Then put each goal on one or more days.</p>'}
     ${usual.length ? `<div class="row"><button type="button" class="btn" data-act="usual">Put ${usual.length === 1 ? 'the repeating goal' : `${usual.length} repeating goals`} on ${usual.length === 1 ? 'its' : 'their'} usual days</button></div>` : ''}
     <div class="addgoal">
@@ -1472,6 +1523,7 @@ document.addEventListener('click', async (e) => {
       });
       break;
     }
+    case 'task-layout': placeLayout(el.dataset.id, el.dataset.week); break;
     case 'qs-split': {
       const id = el.dataset.id;
       commitPlan((p) => splitQuestions(p, id));
