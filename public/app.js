@@ -7,7 +7,7 @@ import {
   MAX_QUESTIONS, daysBetween, qsLabel, partNote,
 } from './shared.js';
 
-const VERSION = '2.6.0';
+const VERSION = '2.6.1';
 // Preview mode: runs without a server and keeps everything on this device.
 const DEMO = !!globalThis.PLANNER_DEMO;
 const PRE = DEMO ? 'spd-' : 'sp-';
@@ -797,9 +797,14 @@ function shortName(g) {
   return t.replace(/\s+/g, ' ').trim() || g.title;
 }
 // Course code on the first line, what the goal is (and its questions) under it.
-function gridLabel(g, p) {
+// Class kinds are shortened so they fit a phone-width column: "lecture" -> "Lec".
+const CLASS_ABBR = { lecture: 'Lec', lectures: 'Lec', tutorial: 'Tut', tutorials: 'Tut', session: 'Sess', recitation: 'Rec', workshop: 'Wksp', laboratory: 'Lab', lab: 'Lab', seminar: 'Sem', exam: 'Exam', quiz: 'Quiz' };
+const abbr = (t) => t.replace(/[A-Za-z]+/g, (w) => CLASS_ABBR[w.toLowerCase()] || w);
+function gridLabel(g, p, isClass) {
   const qs = p?.qs?.length && findTask(store.state.plan, g.taskId) ? qsLabel(p.qs) : '';
-  const name = [COURSES[g.course] ? shortName(g) : g.title, qs].filter(Boolean).join(' · ');
+  let name = COURSES[g.course] ? shortName(g) : g.title;
+  if (isClass) name = abbr(name);
+  name = [name, qs].filter(Boolean).join(' · ');
   return `${COURSES[g.course] ? `<span class="ev-code">${esc(codeOf(g))}</span>` : ''}<span class="ev-name">${esc(name)}</span>`;
 }
 const cvar = (k) => (COURSES[k] ? `var(--${k})` : 'var(--any)');
@@ -858,7 +863,7 @@ function colHTML(week, d, ev, t0, t1, pm, mini) {
     if (e.kind === 'class') {
       const c = e.c;
       h += mini
-        ? `<div class="ev cls mini" style="${pos};--c:${cvar(c.course)}"><span class="ev-code">${esc(COURSES[c.course]?.short || c.label.trim().slice(0, 4))}</span></div>`
+        ? `<div class="ev cls mini${e.of > 1 ? ' narrow' : ''}" style="${pos};--c:${cvar(c.course)}" aria-label="${esc(c.label)}, ${fmtSpan(e.a, e.end)}">${gridLabel({ title: c.label, course: c.course }, null, true)}</div>`
         : `<div class="ev cls${size}${(e.b - e.a) * pm >= 84 ? ' tall' : ''}" style="${pos};--c:${cvar(c.course)}"><span class="ev-t">${esc(c.label)}</span><span class="ev-h">${fmtSpan(e.a, e.end)}</span></div>`;
       continue;
     }
@@ -866,7 +871,7 @@ function colHTML(week, d, ev, t0, t1, pm, mini) {
     const state = `${e.done ? ' done' : ''}${e.late ? ' late' : ''}`;
     const said = `${esc(g.title)}, ${DAY_NAMES[d]} ${fmtSpan(e.a, e.end)}${e.done ? ', done' : e.late ? ', late' : ''}`;
     if (mini) {
-      h += `<div class="ev goal mini${state}" data-drag="part" data-id="${esc(p.id)}" style="${pos};--c:${cvar(g.course)}">
+      h += `<div class="ev goal mini${state}${e.of > 1 ? ' narrow' : ''}" data-drag="part" data-id="${esc(p.id)}" style="${pos};--c:${cvar(g.course)}">
         <button type="button" class="ev-body" data-act="open-goal" data-id="${esc(g.id)}" data-part="${esc(p.id)}" aria-label="${said}">${e.done ? ICON_TICK : ''}${gridLabel(g, p)}${e.late ? '<span class="ev-late">late</span>' : ''}</button></div>`;
       continue;
     }
