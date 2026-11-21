@@ -312,3 +312,18 @@ ol.steps-list { margin: 0; padding-left: 20px; display: flex; flex-direction: co
   .card, .dock-day { transition: background-color .12s; }
 }
 body.has-sheet .toast { bottom: auto; top: calc(env(safe-area-inset-top, 0px) + 12px); }
+
+/* Deadlines */
+.prog { display: inline-block; width: 56px; height: 6px; border-radius: 3px; background: var(--sunk); overflow: hidden; }
+.prog i { display: block; height: 100%; background: var(--fg); border-radius: 3px; }
+.warns { display: flex; flex-direction: column; gap: 2px; padding-left: 18px; }
+.sheet > .warns { padding-left: 0; }
+.warns .warn-text { display: flex; align-items: center; gap: 5px; }
+.warns .ico { width: 14px; height: 14px; flex: none; }
+.task .btn { flex: none; }
+.task.done .t > span:not(.sw) { color: var(--done); text-decoration: line-through; text-decoration-color: var(--done); }
+.tag.due.warn { background: var(--warn-bg); }
+.qgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(48px, 1fr)); gap: 6px; }
+.qgrid .seg { padding: 8px 0; font-size: 13px; text-align: center; font-family: var(--mono); }
+.hwbox { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; display: flex; flex-direction: column; gap: 10px; }
+.goal-sub.nopad { padding-left: 0; }

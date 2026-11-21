@@ -3,6 +3,7 @@ import { sendPush } from './push.js';
 import {
   DEFAULT_PLAN, DEFAULT_SETTINGS, DAY_NAMES, migratePlan, renameCourses, ensureWeek, nowLocal, weekOf, addDays, dowOf,
   dayParts, lateParts, openToday, unplacedGoals, planningLeft, partLabel,
+  TASKS, openTasks, taskProgress, tasksToPlan, daysBetween,
 } from '../public/shared.js';
 
 const SCHEMA = [
@@ -157,14 +158,24 @@ export async function buildReminder(env, when, slot) {
   // Repeating goals are filled in here without saving, exactly as the phone does.
   const plan = structuredClone(saved);
   ensureWeek(plan, week); ensureWeek(plan, next);
-  const { results } = await db.prepare('SELECT item, done FROM ticks WHERE week = ?').bind(week).all();
-  const wt = Object.fromEntries(results.map((r) => [r.item, { done: r.done }]));
+  const tickRows = async (w) => Object.fromEntries((await db.prepare('SELECT item, done FROM ticks WHERE week = ?').bind(w).all()).results.map((r) => [r.item, { done: r.done }]));
+  const [wt, tt] = await Promise.all([tickRows(week), tickRows(TASKS)]);
 
-  // Saturday is planning day: say so while next week still has goals without a day.
+  // Saturday is planning day: say so while next week still has goals without a day,
+  // or homework due soon that isn't in next week yet.
   const left = planningLeft(plan, null, next);
-  const planNext = dow === 6 && (left.unplaced > 0 || left.goals === 0)
-    ? (left.goals ? `Plan next week: ${plural(left.unplaced, 'goal')} to place` : 'Plan next week: no goals yet')
-    : null;
+  const toPlan = dow === 6 ? tasksToPlan(plan, tt, next).length : 0;
+  const planBits = [];
+  if (dow === 6 && left.unplaced > 0) planBits.push(`${plural(left.unplaced, 'goal')} to place`);
+  if (dow === 6 && left.goals === 0 && !toPlan) planBits.push('no goals yet');
+  if (toPlan) planBits.push(`${plural(toPlan, 'deadline')} not in it`);
+  const planNext = planBits.length ? `Plan next week: ${planBits.join(', ')}` : null;
+
+  // Homework due today or tomorrow, with the questions still open.
+  const dueSoon = openTasks(plan, tt).filter((t) => { const n = daysBetween(today, t.due); return n >= 0 && n <= 1; }).map((t) => {
+    const pr = taskProgress(tt, t);
+    return `${t.title} due ${t.due === today ? 'today' : 'tomorrow'}${pr.left ? ` (${plural(pr.left, 'question')} left)` : ''}`;
+  });
 
   if (slot === 'morning') {
     const todays = dayParts(plan, week, dow);
@@ -172,6 +183,7 @@ export async function buildReminder(env, when, slot) {
     const loose = unplacedGoals(plan, wt, week);
     const lines = [];
     if (todays.length) lines.push(listed(todays));
+    lines.push(...dueSoon);
     if (behind.length) lines.push(`${behind.length} behind from earlier this week`);
     if (loose.length) lines.push(`${plural(loose.length, 'goal')} not on any day`);
     if (planNext) lines.push(planNext);
@@ -180,9 +192,9 @@ export async function buildReminder(env, when, slot) {
   }
 
   const open = openToday(plan, wt, week, dow);
-  if (!open.length && !planNext) return null;
-  if (!open.length) return { title: 'Plan next week', body: planNext.replace('Plan next week: ', ''), tag: 'evening' };
-  return { title: `${open.length} left today`, body: [listed(open), planNext].filter(Boolean).join(' · '), tag: 'evening' };
+  if (!open.length && !planNext && !dueSoon.length) return null;
+  if (!open.length && !dueSoon.length) return { title: 'Plan next week', body: planNext.replace('Plan next week: ', ''), tag: 'evening' };
+  return { title: open.length ? `${open.length} left today` : 'Due soon', body: [open.length ? listed(open) : '', ...dueSoon, planNext].filter(Boolean).join(' · '), tag: 'evening' };
 }
 
 async function runSchedule(env, scheduledTime) {
