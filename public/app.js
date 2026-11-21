@@ -736,6 +736,21 @@ const SNAP = 15;                 // dragging and resizing move in quarter hours
 const PM_DAY = 56 / 60;          // pixels per minute in a day's timeline
 const PM_WEEK = 40 / 60;         // and in the week grid
 const codeOf = (g) => COURSES[g.course]?.short || g.title.trim().slice(0, 4);
+// A goal's title without its course, for the narrow week grid: "Quantum HW2" -> "HW2".
+const reEsc = (w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function shortName(g) {
+  const c = COURSES[g.course];
+  if (!c) return g.title;
+  let t = ` ${g.title} `;
+  for (const w of [c.name, ...c.words].sort((a, b) => b.length - a.length)) t = t.replace(new RegExp(`(^|[^a-z0-9])${reEsc(w)}(?=[^a-z0-9]|$)`, 'i'), '$1');
+  return t.replace(/\s+/g, ' ').trim() || g.title;
+}
+// Course code on the first line, what the goal is (and its questions) under it.
+function gridLabel(g, p) {
+  const qs = p?.qs?.length && findTask(store.state.plan, g.taskId) ? qsLabel(p.qs) : '';
+  const name = [COURSES[g.course] ? shortName(g) : g.title, qs].filter(Boolean).join(' · ');
+  return `${COURSES[g.course] ? `<span class="ev-code">${esc(codeOf(g))}</span>` : ''}<span class="ev-name">${esc(name)}</span>`;
+}
 const cvar = (k) => (COURSES[k] ? `var(--${k})` : 'var(--any)');
 
 // Everything with a time on one day, with a lane for each so overlapping things sit side by side.
@@ -801,7 +816,7 @@ function colHTML(week, d, ev, t0, t1, pm, mini) {
     const said = `${esc(g.title)}, ${DAY_NAMES[d]} ${fmtSpan(e.a, e.end)}${e.done ? ', done' : e.late ? ', late' : ''}`;
     if (mini) {
       h += `<div class="ev goal mini${state}" data-drag="part" data-id="${esc(p.id)}" style="${pos};--c:${cvar(g.course)}">
-        <button type="button" class="ev-body" data-act="open-goal" data-id="${esc(g.id)}" data-part="${esc(p.id)}" aria-label="${said}">${e.done ? ICON_TICK : ''}<span class="ev-code">${esc(codeOf(g))}</span>${e.late ? '<span class="ev-late">late</span>' : ''}</button></div>`;
+        <button type="button" class="ev-body" data-act="open-goal" data-id="${esc(g.id)}" data-part="${esc(p.id)}" aria-label="${said}">${e.done ? ICON_TICK : ''}${gridLabel(g, p)}${e.late ? '<span class="ev-late">late</span>' : ''}</button></div>`;
       continue;
     }
     const sub = [e.x.of > 1 ? `part ${e.x.n} of ${e.x.of}` : '', e.late ? 'late' : '', partNote(p)].filter(Boolean).join(' · ');
@@ -875,7 +890,7 @@ function weekGridHTML(w) {
   const loose = s.plan.days.map((_, i) => `<div class="wk-loose" data-drop="untime" data-day="${i}">${dayParts(s.plan, w, i).filter((x) => !hasTime(x.part)).map((x) => {
     const done = partDone(wt, x.goal, x.part);
     const late = !done && w === thisWeek && i < dow;
-    return `<div class="wk-chip${done ? ' done' : late ? ' late' : ''}" data-drag="part" data-id="${esc(x.part.id)}"><button type="button" data-act="open-goal" data-id="${esc(x.goal.id)}" data-part="${esc(x.part.id)}" aria-label="${esc(x.goal.title)}, ${DAY_NAMES[i]}, no time yet${done ? ', done' : late ? ', late' : ''}">${done ? ICON_TICK : ''}${esc(codeOf(x.goal))}</button></div>`;
+    return `<div class="wk-chip${done ? ' done' : late ? ' late' : ''}" data-drag="part" data-id="${esc(x.part.id)}"><button type="button" data-act="open-goal" data-id="${esc(x.goal.id)}" data-part="${esc(x.part.id)}" aria-label="${esc(x.goal.title)}, ${DAY_NAMES[i]}, no time yet${done ? ', done' : late ? ', late' : ''}">${done ? ICON_TICK : ''}${gridLabel(x.goal, x.part)}</button></div>`;
   }).join('')}</div>`).join('');
   return `<section class="card wk" aria-label="Week timetable">
       <div class="wk-row"><span></span>${head}</div>
@@ -956,7 +971,7 @@ function partQsHTML(g, p, t) {
   for (const x of g.parts) if (x.id !== p.id) for (const q of x.qs || []) elsewhere.set(q, short(x.day));
   return `<div class="field"><span>Questions this day${mine.size ? ` · ${esc(qsLabel([...mine]))}` : ''}</span><div class="qgrid" role="group" aria-label="Questions for ${DAY_NAMES[p.day]}">${Array.from({ length: Math.min(MAX_QUESTIONS, t.questions) }, (_, i) => {
     const q = i + 1; const on = mine.has(q); const other = elsewhere.get(q); const done = !!tt[qKey(t, q)]?.done;
-    return `<button type="button" class="seg${done ? ' qdone' : ''}${other ? ' qother' : ''}" data-act="part-q" data-id="${esc(p.id)}" data-q="${q}" aria-pressed="${on}" aria-label="Question ${q}${on ? `, on ${DAY_NAMES[p.day]}` : other ? `, on ${other}` : ''}${done ? ', done' : ''}">Q${q}${other && !on ? `<small>${esc(other)}</small>` : ''}</button>`;
+    return `<button type="button" class="seg${done ? ' qdone' : ''}${other ? ' qother' : ''}" data-act="part-q" data-id="${esc(p.id)}" data-q="${q}" aria-pressed="${on}" aria-label="Question ${q}${on ? `, on ${DAY_NAMES[p.day]}` : other ? `, on ${other}` : ''}${done ? ', done' : ''}">Q${q}${done ? '<small>done</small>' : other && !on ? `<small>${esc(other)}</small>` : ''}</button>`;
   }).join('')}</div></div>`;
 }
 
