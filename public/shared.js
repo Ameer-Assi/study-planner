@@ -247,7 +247,7 @@ export function copyWeek(plan, from, to, newId, keepTask = () => true) {
   const out = [];
   for (const g of weekGoals(plan, from)) {
     const task = g.taskId ? findTask(plan, g.taskId) : null;
-    if (g.taskId && (!task || task.due < to || !keepTask(task))) continue;
+    if (g.taskId && (!task || dueBy(task) < to || !keepTask(task))) continue;
     const parts = sortedParts(g).map((p) => ({ id: newId(), day: p.day, note: p.note || '', at: p.at, ...(hasTime(p) ? { start: p.start, mins: partMins(p) } : {}) }));
     const r = repeatOf(plan, g);
     let t;
@@ -273,10 +273,12 @@ export function copyWeek(plan, from, to, newId, keepTask = () => true) {
 
 // Goals older than this many weeks are dropped from the saved plan.
 export const KEEP_WEEKS = 6;
-export function pruneGoals(plan, week) {
+// Homework with no due date is kept while it's open; once handed in, until its last week is old.
+// `tt` is the TASKS ticks; without it, homework with no due date is always kept.
+export function pruneGoals(plan, week, tt) {
   const oldest = addDays(week, -7 * KEEP_WEEKS);
   plan.goals = plan.goals.filter((g) => g.week >= oldest);
-  if (plan.tasks) plan.tasks = plan.tasks.filter((t) => t.due >= oldest);
+  if (plan.tasks) plan.tasks = plan.tasks.filter((t) => (hasDue(t) ? t.due >= oldest : !tt || !taskDone(tt, t) || lastWorked(plan, t) >= oldest));
 }
 
 // Questions given to one day of a homework, as "Q1–2, Q5".
@@ -318,7 +320,9 @@ export function fullTitle(x) {
 }
 
 // ---------- Homework with a due date ----------
-//   plan.tasks   { id, title, course, due: 'YYYY-MM-DD', questions: n (0 = no checklist), created }
+//   plan.tasks   { id, title, course, due: 'YYYY-MM-DD' or '' for no due date, questions: n (0 = no checklist), created, dueWas? }
+// Homework with no due date (some courses don't set one) keeps the checklist and weeks, but
+// gets no due-date warnings or reminders. For "is it still due by week X" it counts as never due.
 // A task isn't tied to a week. Each week it's worked on, it gets a goal in that week with
 // `taskId` set and a fixed id (task + week), placed on days like any goal. Ticking those days
 // only means "worked on it". The task itself, and each question, is ticked under the week
@@ -331,6 +335,16 @@ export const findTask = (plan, id) => (id ? allTasks(plan).find((t) => t.id === 
 export const taskDone = (tt, t) => !!tt?.[t.id]?.done;
 export const taskGoals = (plan, t) => (plan.goals || []).filter((g) => g.taskId === t.id && !g.deleted);
 export const MAX_QUESTIONS = 20;
+export const hasDue = (t) => /^\d{4}-\d{2}-\d{2}$/.test(t?.due || '');
+export const dueBy = (t) => (hasDue(t) ? t.due : '9999-12-31');
+// The last day of the last week it was in, or the day it was added.
+export function lastWorked(plan, t) {
+  let d = t.created || '';
+  for (const g of taskGoals(plan, t)) { const e = addDays(g.week, 6); if (e > d) d = e; }
+  return d;
+}
+// When it's over: its due date, or with none, its last week.
+export const taskEnd = (plan, t) => (hasDue(t) ? t.due : lastWorked(plan, t));
 
 export function taskProgress(tt, t) {
   const of = Math.max(0, Math.min(MAX_QUESTIONS, t.questions || 0));
@@ -339,11 +353,12 @@ export function taskProgress(tt, t) {
   return { done, of, left: of - done };
 }
 
-// Open tasks by due date, soonest first.
-export const openTasks = (plan, tt) => allTasks(plan).filter((t) => !taskDone(tt, t)).sort((a, b) => (a.due < b.due ? -1 : a.due > b.due ? 1 : 0));
+// Open tasks by due date, soonest first; those with no due date last.
+export const openTasks = (plan, tt) => allTasks(plan).filter((t) => !taskDone(tt, t)).sort((a, b) => (dueBy(a) < dueBy(b) ? -1 : dueBy(a) > dueBy(b) ? 1 : 0));
 
 // "due today", "due tomorrow", "due Thu", "due 3 Dec", "2 days late".
 export function dueLabel(due, today) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(due || '')) return 'no due date';
   const n = daysBetween(today, due);
   if (n < 0) return n === -1 ? '1 day late' : `${-n} days late`;
   if (n === 0) return 'due today';
@@ -354,13 +369,13 @@ export function dueLabel(due, today) {
 
 // Open tasks due by `until` (inclusive) that have no goal in `week` yet: the ones to plan in.
 export function tasksToPlan(plan, tt, week, until = addDays(week, 9)) {
-  return openTasks(plan, tt).filter((t) => t.due >= week && t.due <= until && !plan.goals.some((g) => g.id === taskGoalId(t.id, week) && !g.deleted));
+  return openTasks(plan, tt).filter((t) => hasDue(t) && t.due >= week && t.due <= until && !plan.goals.some((g) => g.id === taskGoalId(t.id, week) && !g.deleted));
 }
 
 // Everything worth warning about for one task. `ticks` is every week's ticks, by week.
 export function taskWarnings(plan, ticks, t, today) {
   const tt = ticks?.[TASKS] || {};
-  if (taskDone(tt, t)) return [];
+  if (taskDone(tt, t) || !hasDue(t)) return [];
   const out = [];
   const days = daysBetween(today, t.due);
   const parts = [];

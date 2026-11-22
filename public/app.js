@@ -4,10 +4,10 @@ import {
   unplacedGoals, planningLeft, usualDays, usualSlots, copyWeek,
   DAY_START, DAY_END, toMin, fmtMin, fmtSpan, classMins, partMins, hasTime,
   TASKS, taskGoalId, qKey, allTasks, findTask, taskDone, taskGoals, taskProgress, openTasks, dueLabel, tasksToPlan, taskWarnings,
-  MAX_QUESTIONS, daysBetween, qsLabel, partNote, fullTitle, bareTitle,
+  MAX_QUESTIONS, daysBetween, qsLabel, partNote, fullTitle, bareTitle, hasDue, dueBy, taskEnd,
 } from './shared.js';
 
-const VERSION = '2.6.4';
+const VERSION = '2.7.0';
 // Preview mode: runs without a server and keeps everything on this device.
 const DEMO = !!globalThis.PLANNER_DEMO;
 const PRE = DEMO ? 'spd-' : 'sp-';
@@ -178,7 +178,7 @@ function commitPlan(mutator) {
   mutator(plan);
   const { week } = clock();
   ensureWeek(plan, week); ensureWeek(plan, addDays(week, 7));
-  pruneGoals(plan, week);
+  pruneGoals(plan, week, tticks());
   commit({ type: 'plan', plan });
 }
 function commitSettings(mutator) {
@@ -305,7 +305,7 @@ function lastLayout(t, w) {
   for (const g of plan.goals.filter((x) => x.taskId === prev && !x.deleted).sort((a, b) => (a.week < b.week ? -1 : 1))) {
     for (const p of sortedParts(g)) if (!seen.has(p.day)) seen.set(p.day, { day: p.day, ...(hasTime(p) ? { start: p.start, mins: partMins(p) } : {}) });
   }
-  const slots = [...seen.values()].sort((a, b) => a.day - b.day).filter((x) => { const d = addDays(w, x.day); return d >= today && d <= t.due; });
+  const slots = [...seen.values()].sort((a, b) => a.day - b.day).filter((x) => { const d = addDays(w, x.day); return d >= today && d <= dueBy(t); });
   const pt = findTask(plan, prev) || plan.goals.find((g) => g.taskId === prev);
   const from = pt ? fullTitle(pt) : 'last time';
   return slots.length ? { slots, from } : null;
@@ -369,15 +369,15 @@ function saveTask() {
   const f = ui.taskForm; if (!f) return;
   const title = String(f.title || '').trim().slice(0, 120);
   if (!title) { f.err = 'Give it a name, like “Quantum HW2”.'; render(); document.getElementById('t-title')?.focus(); return; }
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(f.due || '')) { f.err = 'Pick the due date.'; render(); return; }
+  if (!f.noDue && !/^\d{4}-\d{2}-\d{2}$/.test(f.due || '')) { f.err = 'Pick the due date, or tick “No due date”.'; render(); return; }
   const task = {
-    id: uid(), title, course: f.course === 'auto' ? guessCourse(title) : f.course, due: f.due,
+    id: uid(), title, course: f.course === 'auto' ? guessCourse(title) : f.course, due: f.noDue ? '' : f.due,
     questions: Math.max(0, Math.min(MAX_QUESTIONS, +f.questions || 0)), created: clock().today,
   };
   ui.taskForm = null;
   document.activeElement?.blur();
   commitPlan((p) => { (p.tasks ||= []).push(task); });
-  toast(`${fullTitle(task)}: ${dueLabel(task.due, clock().today)}. Add it to a week when you start.`);
+  toast(`${fullTitle(task)}: ${hasDue(task) ? dueLabel(task.due, clock().today) : 'no due date'}. Add it to a week when you start.`);
 }
 
 // ---------- Rendering ----------
@@ -410,7 +410,7 @@ function partHTML(x, week, opts = {}) {
   const wt = store.state.ticks[week] || {};
   const done = partDone(wt, g, p);
   const task = findTask(store.state.plan, g.taskId);
-  const soon = task && !taskDone(tticks(), task) && daysBetween(clock().today, task.due) <= 6;
+  const soon = task && hasDue(task) && !taskDone(tticks(), task) && daysBetween(clock().today, task.due) <= 6;
   const qs = task && p.qs?.length ? `<span class="tag qs">${esc(qsLabel(p.qs))}</span>` : '';
   const tags = `${qs}${soon ? dueTag(task) : ''}${hasTime(p) ? `<span class="tag time">${fmtSpan(p.start, p.start + partMins(p))}</span>` : ''}${x.of > 1 ? `<span class="tag">part ${x.n} of ${x.of}</span>` : ''}${opts.late && !done ? `<span class="tag late">${opts.from != null ? esc(short(opts.from)) : 'late'}</span>` : ''}`;
   return `<li class="part${done ? ' done' : ''}"${opts.drag ? ` data-drag="part" data-id="${esc(p.id)}"` : ''}>
@@ -435,7 +435,7 @@ function goalHTML(g, week, opts = {}) {
     ${opts.drag ? GRIP : ''}
     <button type="button" class="goal-body" data-act="open-goal" data-id="${esc(g.id)}">
       <span class="t">${sw(g.course)}<span>${esc(fullTitle(g))}</span>${repeatOf(s.plan, g) ? ICON_REPEAT : ''}</span>
-      <span class="goal-sub">${dotsHTML(g, wt)}${done ? '<span class="tag ok">done</span>' : loose ? '<span class="tag warn">no day yet</span>' : ''}${task && !taskDone(tticks(), task) ? dueTag(task) + progHTML(task) : ''}</span>
+      <span class="goal-sub">${dotsHTML(g, wt)}${done ? '<span class="tag ok">done</span>' : loose ? '<span class="tag warn">no day yet</span>' : ''}${task && !taskDone(tticks(), task) ? (hasDue(task) ? dueTag(task) : '') + progHTML(task) : ''}</span>
     </button>
     ${task && opts.drag ? sameDaysBtn(task, week, g) : ''}
   </li>`;
@@ -446,7 +446,7 @@ function copyWeekHTML(next) {
   const s = store.state;
   const from = addDays(next, -7);
   // Homework that's handed in, or due before next week, doesn't come across.
-  const src = weekGoals(s.plan, from).filter((g) => { const t = findTask(s.plan, g.taskId); return !g.taskId || (t && t.due >= next && !taskDone(tticks(), t)); });
+  const src = weekGoals(s.plan, from).filter((g) => { const t = findTask(s.plan, g.taskId); return !g.taskId || (t && dueBy(t) >= next && !taskDone(tticks(), t)); });
   if (!src.length) return '';
   const placed = weekGoals(s.plan, next).filter((g) => g.parts.length).length;
   if (ui.confirm === 'copy-week') {
@@ -484,6 +484,7 @@ const qOptions = (cur) => Array.from({ length: MAX_QUESTIONS + 1 }, (_, n) => `<
 const weekName = (w) => { const { week } = clock(); return w === week ? 'This week' : w === addDays(week, 7) ? 'Next week' : `Week of ${fmtShortDate(w)}`; };
 
 function dueTag(t) {
+  if (!hasDue(t)) return '<span class="tag">no due date</span>';
   const { today } = clock();
   const n = daysBetween(today, t.due);
   return `<span class="tag due${n < 0 ? ' late' : n <= 2 ? ' warn' : ''}">${esc(dueLabel(t.due, today))}</span>`;
@@ -501,7 +502,7 @@ function taskRowHTML(t, week) {
   const done = taskDone(tticks(), t);
   const warns = done ? [] : taskWarnings(s.plan, s.ticks, t, clock().today);
   const inWeek = week && s.plan.goals.some((g) => g.id === taskGoalId(t.id, week) && !g.deleted);
-  const canAdd = week && !done && !inWeek && t.due >= week;
+  const canAdd = week && !done && !inWeek && dueBy(t) >= week;
   return `<li class="goal task${done ? ' done' : ''}">
     <button type="button" class="goal-body" data-act="open-task" data-id="${esc(t.id)}">
       <span class="t">${sw(t.course)}<span>${esc(fullTitle(t))}</span></span>
@@ -531,9 +532,10 @@ function taskFormHTML() {
   return `<div class="editbox" data-form="task">
     <label class="field"><span>Homework</span><input type="text" id="t-title" data-act="tf" data-k="title" value="${esc(f.title)}" placeholder="Quantum HW2" enterkeyhint="done" autocomplete="off"></label>
     <div class="row">
-      <label class="field"><span>Due</span><input type="date" id="t-due" data-act="tf" data-k="due" value="${esc(f.due)}"></label>
+      <label class="field"><span>Due</span>${f.noDue ? '<div class="nodue">No due date</div>' : `<input type="date" id="t-due" data-act="tf" data-k="due" value="${esc(f.due)}">`}</label>
       <label class="field"><span>Questions</span><select id="t-q" data-act="tf" data-k="questions">${qOptions(+f.questions || 0)}</select></label>
     </div>
+    <label class="toggle"><input type="checkbox" id="t-nodue" data-act="tf-nodue"${f.noDue ? ' checked' : ''}> No due date</label>
     <label class="field"><span>Course</span><select id="t-course" data-act="tf" data-k="course">
       <option value="auto"${f.course === 'auto' ? ' selected' : ''}>Course: auto</option>
       <option value=""${f.course === '' ? ' selected' : ''}>General</option>
@@ -551,11 +553,11 @@ function deadlinesHTML(week, onToday) {
   const { today } = clock();
   const tt = tticks();
   let open = openTasks(s.plan, tt);
-  if (onToday) open = open.filter((t) => daysBetween(today, t.due) <= 14 || taskWarnings(s.plan, s.ticks, t, today).length);
+  if (onToday) open = open.filter((t) => (hasDue(t) && daysBetween(today, t.due) <= 14) || taskWarnings(s.plan, s.ticks, t, today).length);
   if (onToday && !open.length && !ui.taskForm) return '';
   const warned = open.filter((t) => taskWarnings(s.plan, s.ticks, t, today).length).length;
   const toAdd = week ? tasksToPlan(s.plan, tt, week).length : 0;
-  const done = allTasks(s.plan).filter((t) => taskDone(tt, t) && t.due >= addDays(today, -14)).sort((a, b) => (a.due < b.due ? 1 : -1));
+  const done = allTasks(s.plan).filter((t) => taskDone(tt, t) && taskEnd(s.plan, t) >= addDays(today, -14)).sort((a, b) => (taskEnd(s.plan, a) < taskEnd(s.plan, b) ? 1 : -1));
   const status = warned ? `${warned} need${warned === 1 ? 's' : ''} attention` : toAdd ? `${toAdd} due soon, not in this week` : open.length ? `${open.length} open` : '';
   return `<section class="card deadlines" id="deadlines"><div class="card-head"><h2>Deadlines</h2><span class="small ${warned || toAdd ? 'warn-text' : 'muted'}">${esc(status)}</span></div>
     ${open.length ? `<ul class="goals">${open.map((t) => taskRowHTML(t, week)).join('')}</ul>`
@@ -585,7 +587,7 @@ function taskSheetHTML(t) {
   const pr = taskProgress(tt, t);
   const warns = done ? [] : taskWarnings(s.plan, s.ticks, t, today);
   const sessions = taskGoals(s.plan, t).sort((a, b) => (a.week < b.week ? -1 : 1));
-  const adds = done ? [] : [week, addDays(week, 7)].filter((w) => t.due >= w && !sessions.some((g) => g.week === w));
+  const adds = done ? [] : [week, addDays(week, 7)].filter((w) => dueBy(t) >= w && !sessions.some((g) => g.week === w));
   const del = ui.confirm === 'del-task'
     ? `<button type="button" class="btn danger" data-act="task-delete" data-id="${id}">Delete homework</button><button type="button" class="btn ghost" data-act="cancel-confirm">Keep</button>`
     : '<button type="button" class="btn ghost danger" data-act="confirm" data-key="del-task">Delete</button>';
@@ -594,9 +596,10 @@ function taskSheetHTML(t) {
     <div class="card-head"><p class="label">Homework · ${esc(done ? 'handed in' : dueLabel(t.due, today))}</p><button type="button" class="btn primary" data-act="sheet-close">Done</button></div>
     <label class="field"><span>Homework</span><input type="text" id="ts-title" data-act="task-title" data-id="${id}" value="${esc(t.title)}" autocomplete="off"></label>
     <div class="row">
-      <label class="field"><span>Due</span><input type="date" id="ts-due" data-act="task-due" data-id="${id}" value="${esc(t.due)}"></label>
+      <label class="field"><span>Due</span>${hasDue(t) ? `<input type="date" id="ts-due" data-act="task-due" data-id="${id}" value="${esc(t.due)}">` : '<div class="nodue">No due date</div>'}</label>
       <label class="field"><span>Questions</span><select id="ts-q" data-act="task-qn" data-id="${id}">${qOptions(pr.of)}</select></label>
     </div>
+    ${done ? '' : `<label class="toggle"><input type="checkbox" id="ts-nodue" data-act="task-nodue" data-id="${id}"${hasDue(t) ? '' : ' checked'}> No due date</label>`}
     <label class="field"><span>Course</span><select id="ts-course" data-act="task-course" data-id="${id}">
       <option value="">General</option>${TRACKED.map((k) => `<option value="${k}"${k === t.course ? ' selected' : ''}>${esc(COURSES[k].name)}</option>`).join('')}</select></label>
     ${warnsHTML(warns)}
@@ -708,12 +711,12 @@ function viewPlan() {
   const tt = tticks();
   const hwGoals = goals.filter((g) => g.taskId);
   const plain = goals.filter((g) => !g.taskId);
-  const hwOpen = openTasks(s.plan, tt).filter((t) => t.due >= w || hwGoals.some((g) => g.taskId === t.id));
+  const hwOpen = openTasks(s.plan, tt).filter((t) => dueBy(t) >= w || hwGoals.some((g) => g.taskId === t.id));
   const hwRows = [
     ...hwOpen.map((t) => { const g = hwGoals.find((x) => x.taskId === t.id); return g ? goalHTML(g, w, { drag: true }) : taskTrayHTML(t, w); }),
     ...hwGoals.filter((g) => !hwOpen.some((t) => t.id === g.taskId)).map((g) => goalHTML(g, w, { drag: true })),
   ];
-  const handedIn = allTasks(s.plan).filter((t) => taskDone(tt, t) && t.due >= addDays(today, -14)).sort((a, b) => (a.due < b.due ? 1 : -1));
+  const handedIn = allTasks(s.plan).filter((t) => taskDone(tt, t) && taskEnd(s.plan, t) >= addDays(today, -14)).sort((a, b) => (taskEnd(s.plan, a) < taskEnd(s.plan, b) ? 1 : -1));
   const outside = hwOpen.filter((t) => !hwGoals.some((g) => g.taskId === t.id)).length;
   const headStatus = [loose ? `${loose} without a day` : goals.length ? 'all on a day' : '', outside ? `${outside} homework not in the week` : ''].filter(Boolean).join(' · ');
   const tray = `<section class="card tray" data-drop="tray">
@@ -1728,6 +1731,16 @@ document.addEventListener('change', (e) => {
     if (v === s.plan.days[d].hours) return;
     holdRender();
     commitPlan((p) => { p.days[d].hours = v; });
+  } else if (act === 'tf-nodue' && ui.taskForm) {
+    ui.taskForm.noDue = el.checked; ui.taskForm.err = null;
+    render();
+  } else if (act === 'task-nodue') {
+    const id = el.dataset.id; const t = findTask(s.plan, id);
+    if (!t) return;
+    // Turning it back on brings back the date it had, or two weeks from today.
+    const back = t.dueWas && t.dueWas >= clock().today ? t.dueWas : addDays(clock().today, 14);
+    commitPlan((p) => { const x = findTask(p, id); if (el.checked) { if (hasDue(x)) x.dueWas = x.due; x.due = ''; } else { x.due = back; delete x.dueWas; } });
+    toast(el.checked ? 'No due date' : `Now ${dueLabel(back, clock().today)}`);
   } else if (act === 'add-repeat') {
     ui.addRepeat = el.checked;
   } else if (act === 'goal-title' || act === 'goal-course') {

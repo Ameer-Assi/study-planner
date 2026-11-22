@@ -3,7 +3,7 @@ import { sendPush } from './push.js';
 import {
   DEFAULT_PLAN, DEFAULT_SETTINGS, DAY_NAMES, migratePlan, renameCourses, ensureWeek, nowLocal, weekOf, addDays, dowOf,
   dayParts, lateParts, openToday, unplacedGoals, planningLeft, partLabel, fullTitle,
-  TASKS, openTasks, taskProgress, tasksToPlan, daysBetween,
+  TASKS, openTasks, taskProgress, tasksToPlan, daysBetween, hasDue,
 } from '../public/shared.js';
 
 const SCHEMA = [
@@ -172,7 +172,7 @@ export async function buildReminder(env, when, slot) {
   const planNext = planBits.length ? `Plan next week: ${planBits.join(', ')}` : null;
 
   // Homework due today or tomorrow, with the questions still open.
-  const dueSoon = openTasks(plan, tt).filter((t) => { const n = daysBetween(today, t.due); return n >= 0 && n <= 1; }).map((t) => {
+  const dueSoon = openTasks(plan, tt).filter((t) => { if (!hasDue(t)) return false; const n = daysBetween(today, t.due); return n >= 0 && n <= 1; }).map((t) => {
     const pr = taskProgress(tt, t);
     return `${fullTitle(t)} due ${t.due === today ? 'today' : 'tomorrow'}${pr.left ? ` (${plural(pr.left, 'question')} left)` : ''}`;
   });
