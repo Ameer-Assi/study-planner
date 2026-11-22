@@ -291,7 +291,29 @@ export function qsLabel(qs) {
 }
 // What a part is about: its questions and its note.
 export const partNote = (p) => [qsLabel(p.qs), p.note].filter(Boolean).join(' · ');
-export const partLabel = (x) => (partNote(x.part) ? `${x.goal.title} (${partNote(x.part)})` : x.goal.title);
+export const partLabel = (x) => (partNote(x.part) ? `${fullTitle(x.goal)} (${partNote(x.part)})` : fullTitle(x.goal));
+
+// ---------- Titles ----------
+// A title can leave out its course ("HW3") since the course is picked separately.
+// The week grid shows the course code above the title, so it uses bareTitle ("Quantum HW2" -> "HW2").
+// Lists, reminders and toasts use fullTitle, which puts the course in front when the title doesn't
+// already say it ("HW3" -> "Quantum HW3"; "Quantum HW2" stays as it is).
+const reEsc = (w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const squash = (t) => String(t || '').replace(/\s+/g, ' ').trim();
+function stripCourse(x) {
+  const c = COURSES[x.course];
+  let t = ` ${x.title || ''} `;
+  for (const w of [c.name, ...c.words].sort((a, b) => b.length - a.length)) t = t.replace(new RegExp(`(^|[^a-z0-9])${reEsc(w)}(?=[^a-z0-9]|$)`, 'i'), '$1');
+  return squash(t);
+}
+export const bareTitle = (x) => (COURSES[x.course] ? stripCourse(x) || x.title : x.title);
+export function fullTitle(x) {
+  const c = COURSES[x.course];
+  const t = squash(x.title);
+  if (!c) return x.title;
+  if (!t) return c.name;
+  return stripCourse(x) === t ? `${c.name} ${t}` : x.title;
+}
 
 // ---------- Homework with a due date ----------
 //   plan.tasks   { id, title, course, due: 'YYYY-MM-DD', questions: n (0 = no checklist), created }

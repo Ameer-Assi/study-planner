@@ -4,10 +4,10 @@ import {
   unplacedGoals, planningLeft, usualDays, usualSlots, copyWeek,
   DAY_START, DAY_END, toMin, fmtMin, fmtSpan, classMins, partMins, hasTime,
   TASKS, taskGoalId, qKey, allTasks, findTask, taskDone, taskGoals, taskProgress, openTasks, dueLabel, tasksToPlan, taskWarnings,
-  MAX_QUESTIONS, daysBetween, qsLabel, partNote,
+  MAX_QUESTIONS, daysBetween, qsLabel, partNote, fullTitle, bareTitle,
 } from './shared.js';
 
-const VERSION = '2.6.1';
+const VERSION = '2.6.2';
 // Preview mode: runs without a server and keeps everything on this device.
 const DEMO = !!globalThis.PLANNER_DEMO;
 const PRE = DEMO ? 'spd-' : 'sp-';
@@ -211,7 +211,7 @@ function placeGoal(goalId, d, quiet, before) {
   const order = before === undefined ? null : withInserted(g.week, d, id, before);
   commitPlan((p) => { findGoal(p, goalId).parts.push({ id, day: d, note: '', at: Date.now() }); if (order) orderDay(p, order); });
   const days = sortedParts(findGoal(store.state.plan, goalId)).map((p) => short(p.day));
-  if (!quiet) toast(days.length > 1 ? `${g.title}: split over ${andList(days)}` : `${g.title}: ${DAY_NAMES[d]}`);
+  if (!quiet) toast(days.length > 1 ? `${fullTitle(g)}: split over ${andList(days)}` : `${fullTitle(g)}: ${DAY_NAMES[d]}`);
 }
 function movePart(partId, d, before) {
   const f = findPart(store.state.plan, partId);
@@ -247,14 +247,14 @@ function removePart(partId, quiet) {
 function setPartTime(partId, d, start) {
   const f = findPart(store.state.plan, partId);
   if (!f) return;
-  if (f.p.day !== d && f.g.parts.some((p) => p.day === d)) { toast(`${f.g.title} is already on ${DAY_NAMES[d]}`); return; }
+  if (f.p.day !== d && f.g.parts.some((p) => p.day === d)) { toast(`${fullTitle(f.g)} is already on ${DAY_NAMES[d]}`); return; }
   if (f.p.day === d && (hasTime(f.p) ? f.p.start : null) === start) return;
   commitPlan((p) => {
     const x = findPart(p, partId).p;
     if (x.day !== d) { x.day = d; x.at = Date.now(); }
     if (start == null) delete x.start; else x.start = start;
   });
-  toast(start == null ? `${f.g.title}: no time` : `${f.g.title}: ${short(d)} ${fmtSpan(start, start + partMins(f.p))}`);
+  toast(start == null ? `${fullTitle(f.g)}: no time` : `${fullTitle(f.g)}: ${short(d)} ${fmtSpan(start, start + partMins(f.p))}`);
 }
 // A goal dropped straight onto an hour: it goes on that day at that time.
 function placeGoalAt(goalId, d, start) {
@@ -263,7 +263,7 @@ function placeGoalAt(goalId, d, start) {
   const there = g.parts.find((p) => p.day === d);
   if (there) { setPartTime(there.id, d, start); return; }
   commitPlan((p) => { findGoal(p, goalId).parts.push({ id: uid(), day: d, note: '', at: Date.now(), start }); });
-  toast(`${g.title}: ${short(d)} ${fmtSpan(start, start + 60)}`);
+  toast(`${fullTitle(g)}: ${short(d)} ${fmtSpan(start, start + 60)}`);
 }
 
 // Homework dropped on a day of the week being planned: it joins that week (if it isn't in it
@@ -284,7 +284,7 @@ function placeTask(taskId, d, before, start) {
     g.parts.push({ id: pid, day: d, note: '', at: Date.now(), ...(start != null ? { start } : {}) });
     if (order) orderDay(p, order);
   });
-  toast(`${t.title}: ${DAY_NAMES[d]}${start != null ? ` ${fmtSpan(start, start + 60)}` : ''}. Tap it to pick its questions.`);
+  toast(`${fullTitle(t)}: ${DAY_NAMES[d]}${start != null ? ` ${fmtSpan(start, start + 60)}` : ''}. Tap it to pick its questions.`);
 }
 
 // The days the last homework of the same course was put on (with their times and lengths),
@@ -306,7 +306,8 @@ function lastLayout(t, w) {
     for (const p of sortedParts(g)) if (!seen.has(p.day)) seen.set(p.day, { day: p.day, ...(hasTime(p) ? { start: p.start, mins: partMins(p) } : {}) });
   }
   const slots = [...seen.values()].sort((a, b) => a.day - b.day).filter((x) => { const d = addDays(w, x.day); return d >= today && d <= t.due; });
-  const from = findTask(plan, prev)?.title || plan.goals.find((g) => g.taskId === prev)?.title || 'last time';
+  const pt = findTask(plan, prev) || plan.goals.find((g) => g.taskId === prev);
+  const from = pt ? fullTitle(pt) : 'last time';
   return slots.length ? { slots, from } : null;
 }
 function sameDaysBtn(t, w, g) {
@@ -333,7 +334,7 @@ function placeLayout(taskId, w) {
     });
     if (t.questions) splitQuestions(p, gid);
   });
-  toast(`${t.title}: ${andList(l.slots.map((x) => short(x.day)))}, like ${l.from}`);
+  toast(`${fullTitle(t)}: ${andList(l.slots.map((x) => short(x.day)))}, like ${l.from}`);
 }
 
 // Spreads the questions not done yet over the homework's days in this week, in day order.
@@ -414,9 +415,9 @@ function partHTML(x, week, opts = {}) {
   const tags = `${qs}${soon ? dueTag(task) : ''}${hasTime(p) ? `<span class="tag time">${fmtSpan(p.start, p.start + partMins(p))}</span>` : ''}${x.of > 1 ? `<span class="tag">part ${x.n} of ${x.of}</span>` : ''}${opts.late && !done ? `<span class="tag late">${opts.from != null ? esc(short(opts.from)) : 'late'}</span>` : ''}`;
   return `<li class="part${done ? ' done' : ''}"${opts.drag ? ` data-drag="part" data-id="${esc(p.id)}"` : ''}>
     ${opts.drag ? GRIP : ''}
-    <input type="checkbox" class="check" id="chk-${esc(p.id)}" data-act="tick" data-week="${esc(week)}" data-item="${esc(p.id)}" data-goal="${esc(g.id)}"${done ? ' checked' : ''} aria-label="${esc(g.title)}${p.note ? ', ' + esc(p.note) : ''}">
+    <input type="checkbox" class="check" id="chk-${esc(p.id)}" data-act="tick" data-week="${esc(week)}" data-item="${esc(p.id)}" data-goal="${esc(g.id)}"${done ? ' checked' : ''} aria-label="${esc(fullTitle(g))}${p.note ? ', ' + esc(p.note) : ''}">
     <button type="button" class="part-body" data-act="open-goal" data-id="${esc(g.id)}" data-part="${esc(p.id)}">
-      <span class="t">${sw(g.course)}<span>${esc(g.title)}</span></span>
+      <span class="t">${sw(g.course)}<span>${esc(fullTitle(g))}</span></span>
       ${p.note ? `<span class="note">${esc(p.note)}</span>` : ''}
       ${tags ? `<span class="meta">${tags}</span>` : ''}
     </button>
@@ -433,7 +434,7 @@ function goalHTML(g, week, opts = {}) {
   return `<li class="goal${done ? ' done' : ''}${loose ? ' loose' : ''}"${opts.drag ? ` data-drag="goal" data-id="${esc(g.id)}"` : ''}>
     ${opts.drag ? GRIP : ''}
     <button type="button" class="goal-body" data-act="open-goal" data-id="${esc(g.id)}">
-      <span class="t">${sw(g.course)}<span>${esc(g.title)}</span>${repeatOf(s.plan, g) ? ICON_REPEAT : ''}</span>
+      <span class="t">${sw(g.course)}<span>${esc(fullTitle(g))}</span>${repeatOf(s.plan, g) ? ICON_REPEAT : ''}</span>
       <span class="goal-sub">${dotsHTML(g, wt)}${done ? '<span class="tag ok">done</span>' : loose ? '<span class="tag warn">no day yet</span>' : ''}${task && !taskDone(tticks(), task) ? dueTag(task) + progHTML(task) : ''}</span>
     </button>
     ${task && opts.drag ? sameDaysBtn(task, week, g) : ''}
@@ -468,7 +469,7 @@ function leftoversHTML() {
   return `<section class="card alert"><div class="card-head"><h2>${ICON_FLAG}Left from last week</h2><span class="small muted">${plural(left.length, 'goal')}</span></div>
     <ul class="list">${left.map((g) => {
       const n = g.parts.filter((p) => partDone(s.ticks[prev], g, p)).length;
-      return `<li><div class="grow"><div class="t">${sw(g.course)}<span>${esc(g.title)}</span></div>
+      return `<li><div class="grow"><div class="t">${sw(g.course)}<span>${esc(fullTitle(g))}</span></div>
         <div class="small muted">${g.parts.length ? `${n} of ${plural(g.parts.length, 'day')} done` : 'was never placed on a day'}</div></div>
         <div class="row tight"><button type="button" class="btn small-btn" data-act="goal-carry" data-id="${esc(g.id)}">Move to this week</button>
         <button type="button" class="btn ghost" data-act="goal-drop" data-id="${esc(g.id)}">Drop</button></div></li>`;
@@ -503,7 +504,7 @@ function taskRowHTML(t, week) {
   const canAdd = week && !done && !inWeek && t.due >= week;
   return `<li class="goal task${done ? ' done' : ''}">
     <button type="button" class="goal-body" data-act="open-task" data-id="${esc(t.id)}">
-      <span class="t">${sw(t.course)}<span>${esc(t.title)}</span></span>
+      <span class="t">${sw(t.course)}<span>${esc(fullTitle(t))}</span></span>
       <span class="goal-sub">${done ? '<span class="tag ok">handed in</span>' : dueTag(t)}${progHTML(t)}${inWeek ? `<span class="tag">in ${esc(weekName(week).toLowerCase())}</span>` : ''}</span>
       ${warnsHTML(warns)}
     </button>
@@ -517,7 +518,7 @@ function taskTrayHTML(t, w) {
   return `<li class="goal task out" data-drag="task" data-id="${esc(t.id)}">
     ${GRIP}
     <button type="button" class="goal-body" data-act="open-task" data-id="${esc(t.id)}">
-      <span class="t">${sw(t.course)}<span>${esc(t.title)}</span></span>
+      <span class="t">${sw(t.course)}<span>${esc(fullTitle(t))}</span></span>
       <span class="goal-sub">${dueTag(t)}${progHTML(t)}<span class="tag">not in this week</span></span>
       ${warnsHTML(warns)}
     </button>
@@ -635,7 +636,7 @@ function viewToday() {
       const lines = [];
       if (left.unplaced) lines.push(`${plural(left.unplaced, 'goal')} for ${weekRange(next)} ${left.unplaced === 1 ? 'isn’t' : 'aren’t'} on a day yet.`);
       else if (!left.goals) lines.push(`No goals for ${weekRange(next)} yet.`);
-      if (toPlan.length) lines.push(`Due soon and not in next week: ${andList(toPlan.map((t) => `${t.title} (${dueLabel(t.due, today)})`))}.`);
+      if (toPlan.length) lines.push(`Due soon and not in next week: ${andList(toPlan.map((t) => `${fullTitle(t)} (${dueLabel(t.due, today)})`))}.`);
       h += `<section class="card callout"><h2>Plan next week</h2>
         <p class="small">${esc(lines.join(' '))}</p>
         <div class="row"><button type="button" class="btn primary" data-act="plan-open" data-which="next">Plan next week</button></div></section>`;
@@ -653,7 +654,7 @@ function viewToday() {
   const loose = unplacedGoals(s.plan, wt, week);
   if (loose.length) {
     h += `<section class="card alert"><div class="card-head"><h2>${ICON_WARN}Not on any day</h2><span class="small muted">${plural(loose.length, 'goal')}</span></div>
-      <p class="small">${esc(andList(loose.map((g) => g.title)))}</p>
+      <p class="small">${esc(andList(loose.map((g) => fullTitle(g))))}</p>
       <div class="row"><button type="button" class="btn" data-act="plan-open" data-which="this">Put ${loose.length === 1 ? 'it' : 'them'} on a day</button></div></section>`;
   }
 
@@ -787,22 +788,13 @@ const SNAP = 15;                 // dragging and resizing move in quarter hours
 const PM_DAY = 56 / 60;          // pixels per minute in a day's timeline
 const PM_WEEK = 40 / 60;         // and in the week grid
 const codeOf = (g) => COURSES[g.course]?.short || g.title.trim().slice(0, 4);
-// A goal's title without its course, for the narrow week grid: "Quantum HW2" -> "HW2".
-const reEsc = (w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-function shortName(g) {
-  const c = COURSES[g.course];
-  if (!c) return g.title;
-  let t = ` ${g.title} `;
-  for (const w of [c.name, ...c.words].sort((a, b) => b.length - a.length)) t = t.replace(new RegExp(`(^|[^a-z0-9])${reEsc(w)}(?=[^a-z0-9]|$)`, 'i'), '$1');
-  return t.replace(/\s+/g, ' ').trim() || g.title;
-}
 // Course code on the first line, what the goal is (and its questions) under it.
 // Class kinds are shortened so they fit a phone-width column: "lecture" -> "Lec".
 const CLASS_ABBR = { lecture: 'Lec', lectures: 'Lec', tutorial: 'Tut', tutorials: 'Tut', session: 'Sess', recitation: 'Rec', workshop: 'Wksp', laboratory: 'Lab', lab: 'Lab', seminar: 'Sem', exam: 'Exam', quiz: 'Quiz' };
 const abbr = (t) => t.replace(/[A-Za-z]+/g, (w) => CLASS_ABBR[w.toLowerCase()] || w);
 function gridLabel(g, p, isClass) {
   const qs = p?.qs?.length && findTask(store.state.plan, g.taskId) ? qsLabel(p.qs) : '';
-  let name = COURSES[g.course] ? shortName(g) : g.title;
+  let name = bareTitle(g);
   if (isClass) name = abbr(name);
   name = [name, qs].filter(Boolean).join(' · ');
   return `${COURSES[g.course] ? `<span class="ev-code">${esc(codeOf(g))}</span>` : ''}<span class="ev-name">${esc(name)}</span>`;
@@ -869,7 +861,7 @@ function colHTML(week, d, ev, t0, t1, pm, mini) {
     }
     const { goal: g, part: p } = e.x;
     const state = `${e.done ? ' done' : ''}${e.late ? ' late' : ''}`;
-    const said = `${esc(g.title)}, ${DAY_NAMES[d]} ${fmtSpan(e.a, e.end)}${e.done ? ', done' : e.late ? ', late' : ''}`;
+    const said = `${esc(fullTitle(g))}, ${DAY_NAMES[d]} ${fmtSpan(e.a, e.end)}${e.done ? ', done' : e.late ? ', late' : ''}`;
     if (mini) {
       h += `<div class="ev goal mini${state}${e.of > 1 ? ' narrow' : ''}" data-drag="part" data-id="${esc(p.id)}" style="${pos};--c:${cvar(g.course)}">
         <button type="button" class="ev-body" data-act="open-goal" data-id="${esc(g.id)}" data-part="${esc(p.id)}" aria-label="${said}">${e.done ? ICON_TICK : ''}${gridLabel(g, p)}${e.late ? '<span class="ev-late">late</span>' : ''}</button></div>`;
@@ -879,7 +871,7 @@ function colHTML(week, d, ev, t0, t1, pm, mini) {
     h += `<div class="ev goal${state}${size}" data-drag="part" data-id="${esc(p.id)}" style="${pos};--c:${cvar(g.course)}">
       <input type="checkbox" class="check" data-act="tick" data-week="${esc(week)}" data-item="${esc(p.id)}" data-goal="${esc(g.id)}"${e.done ? ' checked' : ''} aria-label="${said}">
       <button type="button" class="ev-body" data-act="open-goal" data-id="${esc(g.id)}" data-part="${esc(p.id)}">
-        <span class="ev-t">${esc(g.title)}</span>${sub ? `<span class="ev-s">${esc(sub)}</span>` : ''}
+        <span class="ev-t">${esc(fullTitle(g))}</span>${sub ? `<span class="ev-s">${esc(sub)}</span>` : ''}
       </button>
       <span class="ev-h">${fmtSpan(e.a, e.end)}</span>
       <span class="ev-size" data-resize="${esc(p.id)}" aria-hidden="true"></span>
@@ -919,8 +911,8 @@ function dayTimelineHTML(week, d, title) {
         const isDone = partDone(wt, g, p);
         const sub = [x.of > 1 ? `part ${x.n} of ${x.of}` : '', !isDone && week === thisWeek && d < dow ? 'late' : '', partNote(p)].filter(Boolean).join(' · ');
         return `<li class="chip${isDone ? ' done' : ''}" data-drag="part" data-id="${esc(p.id)}">
-          <input type="checkbox" class="check" data-act="tick" data-week="${esc(week)}" data-item="${esc(p.id)}" data-goal="${esc(g.id)}"${isDone ? ' checked' : ''} aria-label="${esc(g.title)}${p.note ? ', ' + esc(p.note) : ''}">
-          <button type="button" class="chip-body" data-act="open-goal" data-id="${esc(g.id)}" data-part="${esc(p.id)}"><span class="t">${sw(g.course)}<span>${esc(g.title)}</span></span>${sub ? `<span class="chip-s">${esc(sub)}</span>` : ''}</button>
+          <input type="checkbox" class="check" data-act="tick" data-week="${esc(week)}" data-item="${esc(p.id)}" data-goal="${esc(g.id)}"${isDone ? ' checked' : ''} aria-label="${esc(fullTitle(g))}${p.note ? ', ' + esc(p.note) : ''}">
+          <button type="button" class="chip-body" data-act="open-goal" data-id="${esc(g.id)}" data-part="${esc(p.id)}"><span class="t">${sw(g.course)}<span>${esc(fullTitle(g))}</span></span>${sub ? `<span class="chip-s">${esc(sub)}</span>` : ''}</button>
         </li>`;
       }).join('')}</ul>`
         : `<p class="small muted">${parts.length ? 'Everything on this day has a time. Drag one back here to take its time off.' : 'No goals on this day yet. Put one here from the Plan screen.'}</p>`}
@@ -946,7 +938,7 @@ function weekGridHTML(w) {
   const loose = s.plan.days.map((_, i) => `<div class="wk-loose" data-drop="untime" data-day="${i}">${dayParts(s.plan, w, i).filter((x) => !hasTime(x.part)).map((x) => {
     const done = partDone(wt, x.goal, x.part);
     const late = !done && w === thisWeek && i < dow;
-    return `<div class="wk-chip${done ? ' done' : late ? ' late' : ''}" data-drag="part" data-id="${esc(x.part.id)}"><button type="button" data-act="open-goal" data-id="${esc(x.goal.id)}" data-part="${esc(x.part.id)}" aria-label="${esc(x.goal.title)}, ${DAY_NAMES[i]}, no time yet${done ? ', done' : late ? ', late' : ''}">${done ? ICON_TICK : ''}${gridLabel(x.goal, x.part)}</button></div>`;
+    return `<div class="wk-chip${done ? ' done' : late ? ' late' : ''}" data-drag="part" data-id="${esc(x.part.id)}"><button type="button" data-act="open-goal" data-id="${esc(x.goal.id)}" data-part="${esc(x.part.id)}" aria-label="${esc(fullTitle(x.goal))}, ${DAY_NAMES[i]}, no time yet${done ? ', done' : late ? ', late' : ''}">${done ? ICON_TICK : ''}${gridLabel(x.goal, x.part)}</button></div>`;
   }).join('')}</div>`).join('');
   return `<section class="card wk" aria-label="Week timetable">
       <div class="wk-row"><span></span>${head}</div>
@@ -1112,7 +1104,7 @@ function viewSettings() {
     </section>
     ${scheduleCardHTML()}
     <section class="card"><div class="card-head"><h2>Repeating goals</h2><span class="small muted">${reps.length}</span></div>
-      ${reps.length ? `<ul class="list">${reps.map((x) => `<li style="align-items:center"><div class="grow t">${sw(x.course)}<span>${esc(x.title)}</span></div>
+      ${reps.length ? `<ul class="list">${reps.map((x) => `<li style="align-items:center"><div class="grow t">${sw(x.course)}<span>${esc(fullTitle(x))}</span></div>
         ${ui.confirm === 'rep-' + x.id
           ? `<button type="button" class="btn danger" data-act="repeat-stop" data-id="${esc(x.id)}">Stop repeating</button><button type="button" class="btn ghost" data-act="cancel-confirm">Keep</button>`
           : `<button type="button" class="btn ghost" data-act="confirm" data-key="rep-${esc(x.id)}">Stop</button>`}</li>`).join('')}</ul>` : '<p class="small muted">None. Tick “Every week” when you add a goal on the Plan screen.</p>'}
@@ -1283,7 +1275,7 @@ function startDrag(x, y) {
   const g = part ? part.g : type === 'task' ? findTask(store.state.plan, item) : findGoal(store.state.plan, item);
   if (!g) return;
   const ghost = document.createElement('div');
-  ghost.className = 'drag-ghost'; ghost.innerHTML = `<span class="t">${sw(g.course)}<span>${esc(g.title)}</span></span><span class="g-time"></span>`;
+  ghost.className = 'drag-ghost'; ghost.innerHTML = `<span class="t">${sw(g.course)}<span>${esc(fullTitle(g))}</span></span><span class="g-time"></span>`;
   document.body.appendChild(ghost);
   drag.active = { id: p.id, src: p.src, type, item, ghost, touch: p.touch, x0: p.x, y0: p.y, x, y, armed: !p.touch || p.onGrip, target: null,
     mins: part ? partMins(part.p) : 60, start: null, preview: null };
@@ -1513,7 +1505,7 @@ document.addEventListener('click', async (e) => {
         if (g) delete g.deleted;
         else p.goals.push({ id: gid, title: t.title, course: t.course, week: w, taskId: t.id, parts: [] });
       });
-      toast(`${t.title}: in ${weekName(w).toLowerCase()}. Put it on days.`);
+      toast(`${fullTitle(t)}: in ${weekName(w).toLowerCase()}. Put it on days.`);
       break;
     }
     case 'part-q': {
@@ -1552,12 +1544,12 @@ document.addEventListener('click', async (e) => {
         for (const g of taskGoals(s.plan, t)) if (g.week === week && !goalDone(s.ticks[g.week], g)) ops.push(tickOp(g.week, g.id, true));
         commit(...ops);
         if (taskGoals(store.state.plan, t).some((g) => g.week > week)) commitPlan((p) => { p.goals = p.goals.filter((g) => !(g.taskId === t.id && g.week > week)); });
-        toast(`${t.title}: handed in`);
+        toast(`${fullTitle(t)}: handed in`);
       } else {
         const ops = [tickOp(TASKS, t.id, false)];
         for (const g of taskGoals(s.plan, t)) if (g.week >= week && s.ticks[g.week]?.[g.id]?.done) ops.push(tickOp(g.week, g.id, false));
         commit(...ops);
-        toast(`${t.title}: open again`);
+        toast(`${fullTitle(t)}: open again`);
       }
       break;
     }
@@ -1640,7 +1632,7 @@ document.addEventListener('click', async (e) => {
       const g = findGoal(s.plan, el.dataset.id); if (!g) break;
       const wt = s.ticks[g.week] || {};
       if (goalDone(wt, g)) commit(tickOp(g.week, g.id, false), ...g.parts.filter((p) => wt[p.id]?.done).map((p) => tickOp(g.week, p.id, false)));
-      else { commit(tickOp(g.week, g.id, true)); toast(`${g.title}: done`); }
+      else { commit(tickOp(g.week, g.id, true)); toast(`${fullTitle(g)}: done`); }
       break;
     }
     case 'goal-skip': {
@@ -1728,7 +1720,7 @@ document.addEventListener('change', (e) => {
     const task = g && findTask(s.plan, g.taskId);
     if (task && f?.p.qs?.length) for (const q of f.p.qs) if (q <= (task.questions || 0)) ops.push(tickOp(TASKS, qKey(task, q), el.checked));
     commit(...ops);
-    if (el.checked && g && !was && goalDone(store.state.ticks[week], g)) toast(g.parts.length > 1 ? `${g.title}: all ${g.parts.length} parts done` : `${g.title}: done`);
+    if (el.checked && g && !was && goalDone(store.state.ticks[week], g)) toast(g.parts.length > 1 ? `${fullTitle(g)}: all ${g.parts.length} parts done` : `${fullTitle(g)}: done`);
   } else if (act === 'add-course') {
     ui.addCourse = el.value;
   } else if (act === 'day-hours') {
