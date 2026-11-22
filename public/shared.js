@@ -39,18 +39,20 @@ export function fmtShortDate(date) {
 export const COURSES = {
   sig: { name: 'Signals', short: 'Sig', words: ['signal', 'sig'] },
   ds: { name: 'Data structures 1', short: 'DS1', words: ['data structure', 'ds1', 'ds'] },
-  prob: { name: 'Probability', short: 'Prob', words: ['probability', 'probabilty', 'prob', 'webwork'] },
+  prob: { name: 'Probability', short: 'Prob', words: ['probability', 'probabilty', 'prob'], topics: ['webwork'] },
   // Fundamentals of Semiconductor Devices (יסודות התקני מוליכים למחצה). The key stays 'ssd' so saved data keeps working.
   ssd: { name: 'Semiconductors', short: 'Semi', words: ['semiconductor', 'semi conductor', 'semi', 'solid state', 'solid', 'ssd'] },
-  org: { name: 'Organization', short: 'Org', words: ['organization', 'organisation', 'assembly', 'org'] },
+  org: { name: 'Organization', short: 'Org', words: ['organization', 'organisation', 'org'], topics: ['assembly'] },
   qp: { name: 'Quantum', short: 'QP', words: ['quantum', 'qp'] },
 };
+// `words` are other names for the course; `topics` only help guess it ("webwork" -> Probability)
+// and stay in the title, so a goal called "webwork" still reads "Probability webwork".
 export const TRACKED = Object.keys(COURSES);
 
 // Picks the course a goal's title is about ("Probability HW" -> prob), or '' for general.
 export function guessCourse(title) {
   const t = ` ${String(title).toLowerCase().replace(/[^a-z0-9]+/g, ' ')} `;
-  for (const k of TRACKED) if (COURSES[k].words.some((w) => t.includes(` ${w} `) || (w.length > 4 && t.includes(w)))) return k;
+  for (const k of TRACKED) if ([...COURSES[k].words, ...(COURSES[k].topics || [])].some((w) => t.includes(` ${w} `) || (w.length > 4 && t.includes(w)))) return k;
   return '';
 }
 

@@ -7,7 +7,7 @@ import {
   MAX_QUESTIONS, daysBetween, qsLabel, partNote, fullTitle, bareTitle,
 } from './shared.js';
 
-const VERSION = '2.6.3';
+const VERSION = '2.6.4';
 // Preview mode: runs without a server and keeps everything on this device.
 const DEMO = !!globalThis.PLANNER_DEMO;
 const PRE = DEMO ? 'spd-' : 'sp-';
