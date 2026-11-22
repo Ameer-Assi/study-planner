@@ -7,7 +7,7 @@ import {
   MAX_QUESTIONS, daysBetween, qsLabel, partNote, fullTitle, bareTitle,
 } from './shared.js';
 
-const VERSION = '2.6.2';
+const VERSION = '2.6.3';
 // Preview mode: runs without a server and keeps everything on this device.
 const DEMO = !!globalThis.PLANNER_DEMO;
 const PRE = DEMO ? 'spd-' : 'sp-';
@@ -377,7 +377,7 @@ function saveTask() {
   ui.taskForm = null;
   document.activeElement?.blur();
   commitPlan((p) => { (p.tasks ||= []).push(task); });
-  toast(`${title}: ${dueLabel(task.due, clock().today)}. Add it to a week when you start.`);
+  toast(`${fullTitle(task)}: ${dueLabel(task.due, clock().today)}. Add it to a week when you start.`);
 }
 
 // ---------- Rendering ----------
