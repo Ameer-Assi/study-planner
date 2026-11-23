@@ -3,7 +3,7 @@ import { sendPush } from './push.js';
 import {
   DEFAULT_PLAN, DEFAULT_SETTINGS, DAY_NAMES, migratePlan, renameCourses, ensureWeek, nowLocal, weekOf, addDays, dowOf,
   dayParts, lateParts, openToday, unplacedGoals, planningLeft, partLabel, fullTitle,
-  TASKS, openTasks, taskProgress, tasksToPlan, daysBetween, hasDue,
+  TASKS, openTasks, taskProgress, tasksToPlan, daysBetween, hasDue, applyPatch,
 } from '../public/shared.js';
 
 const SCHEMA = [
@@ -11,7 +11,10 @@ const SCHEMA = [
   'CREATE TABLE IF NOT EXISTS ticks (week TEXT NOT NULL, item TEXT NOT NULL, done INTEGER NOT NULL, effort INTEGER, updated INTEGER NOT NULL, PRIMARY KEY (week, item))',
   'CREATE TABLE IF NOT EXISTS deadlines (id TEXT PRIMARY KEY, course TEXT NOT NULL, title TEXT NOT NULL, due TEXT NOT NULL, progress INTEGER NOT NULL DEFAULT 0, deleted INTEGER NOT NULL DEFAULT 0, updated INTEGER NOT NULL)',
   'CREATE TABLE IF NOT EXISTS subs (endpoint TEXT PRIMARY KEY, json TEXT NOT NULL, created INTEGER NOT NULL)',
+  // The plan as it was before each change, so a bad save can be undone from Settings.
+  'CREATE TABLE IF NOT EXISTS plan_history (saved INTEGER NOT NULL, json TEXT NOT NULL)',
 ];
+const KEEP_HISTORY = 60;
 let schemaReady = false;
 async function ensureSchema(db) {
   if (schemaReady) return;
@@ -85,6 +88,19 @@ async function handleSync(request, env) {
   if (!body || !Array.isArray(body.ops) || body.ops.length > 500) return json({ error: 'Bad request' }, 400);
   const db = env.DB;
   const stmts = [];
+  // Patches are applied in order to the stored plan, and it's written once at the end.
+  let merged = null, before = null;
+  for (const op of body.ops) {
+    if (op?.type === 'plan-patch' && op.patch && typeof op.patch === 'object' && isNum(op.updated)) {
+      if (!merged) { const { plan } = await loadCore(db); before = plan; merged = { plan: plan.value, updated: plan.updated }; }
+      merged.plan = applyPatch(merged.plan, op.patch);
+      merged.updated = Math.max(merged.updated, op.updated);
+    }
+  }
+  if (merged && JSON.stringify(merged.plan).length < 200000) {
+    stmts.push(db.prepare('INSERT INTO plan_history (saved, json) VALUES (?, ?)').bind(before.updated || Date.now(), JSON.stringify(before.value)));
+    stmts.push(putKV(db, 'plan', merged.plan, merged.updated));
+  }
   for (const op of body.ops) {
     if (!op || !isNum(op.updated)) continue;
     if (op.type === 'tick' && isStr(op.week, 40) && isStr(op.item, 80)) {
@@ -100,12 +116,20 @@ async function handleSync(request, env) {
         'INSERT INTO deadlines (id, course, title, due, progress, deleted, updated) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(id) DO UPDATE SET course = excluded.course, title = excluded.title, due = excluded.due, progress = excluded.progress, deleted = excluded.deleted, updated = excluded.updated WHERE excluded.updated >= deadlines.updated',
       ).bind(op.id, op.course, op.title, op.due, progress, op.deleted ? 1 : 0, op.updated));
     } else if (op.type === 'plan' && op.plan && Array.isArray(op.plan.days) && op.plan.days.length === 7) {
-      if (JSON.stringify(op.plan).length < 200000) stmts.push(putKV(db, 'plan', op.plan, op.updated));
+      // A whole plan: sent by an older copy of the app, or by "Restore" in Settings.
+      if (JSON.stringify(op.plan).length < 200000) {
+        const cur = await getKV(db, 'plan', null);
+        if (cur.updated) stmts.push(db.prepare('INSERT INTO plan_history (saved, json) VALUES (?, ?)').bind(cur.updated, JSON.stringify(cur.value)));
+        stmts.push(putKV(db, 'plan', op.plan, op.updated));
+      }
     } else if (op.type === 'settings' && op.settings && Array.isArray(op.settings.exams)) {
       if (JSON.stringify(op.settings).length < 50000) stmts.push(putKV(db, 'settings', op.settings, op.updated));
     }
   }
-  if (stmts.length) await db.batch(stmts);
+  if (stmts.length) {
+    await db.batch(stmts);
+    await db.prepare(`DELETE FROM plan_history WHERE rowid NOT IN (SELECT rowid FROM plan_history ORDER BY rowid DESC LIMIT ${KEEP_HISTORY})`).run();
+  }
   return json({ ok: true, applied: stmts.length });
 }
 
@@ -232,6 +256,13 @@ export default {
       if (url.pathname === '/api/sync' && request.method === 'POST') return await handleSync(request, env);
       if (url.pathname === '/api/subscribe' && request.method === 'POST') return await handleSubscribe(request, env, false);
       if (url.pathname === '/api/unsubscribe' && request.method === 'POST') return await handleSubscribe(request, env, true);
+      if (url.pathname === '/api/history' && request.method === 'GET') {
+        // Earlier versions of the plan, newest first, with a short summary of each.
+        const { results } = await env.DB.prepare('SELECT rowid AS id, saved, json FROM plan_history ORDER BY rowid DESC LIMIT ?').bind(KEEP_HISTORY).all();
+        const full = url.searchParams.get('id');
+        if (full) { const r = results.find((x) => String(x.id) === full); return r ? json({ id: r.id, saved: r.saved, plan: JSON.parse(r.json) }) : json({ error: 'Not found' }, 404); }
+        return json({ versions: results.map((r) => { const p = JSON.parse(r.json); return { id: r.id, saved: r.saved, goals: (p.goals || []).filter((g) => !g.deleted).length, tasks: (p.tasks || []).filter((t) => !t.deleted).length }; }) });
+      }
       if (url.pathname === '/api/test-push' && request.method === 'POST') {
         const result = await pushAll(env, { title: 'Reminders are working', body: 'You’ll get your morning and evening reminders here.', tag: 'test', url: '/' });
         return json(result);

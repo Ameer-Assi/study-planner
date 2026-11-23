@@ -161,6 +161,46 @@ export const DEFAULT_SETTINGS = {
   exams: [],
 };
 
+// ---------- Saving the plan in pieces ----------
+// A change to the plan is sent as a patch: the goals, homework and repeating goals that changed
+// or went away (by id), and the days whose hours or classes changed. The server applies it to
+// the plan it has, so two devices (or an app left open with an old copy) can't wipe out each
+// other's changes the way sending the whole plan could.
+const PLAN_LISTS = ['goals', 'tasks', 'repeats'];
+export function diffPlan(a, b) {
+  const patch = {};
+  for (const k of PLAN_LISTS) {
+    const before = new Map((a?.[k] || []).map((x) => [x.id, JSON.stringify(x)]));
+    const after = new Set();
+    const upsert = [];
+    for (const x of b[k] || []) { after.add(x.id); if (before.get(x.id) !== JSON.stringify(x)) upsert.push(x); }
+    const remove = [...before.keys()].filter((id) => !after.has(id));
+    if (upsert.length || remove.length) patch[k] = { upsert, remove };
+  }
+  const days = {};
+  (b.days || []).forEach((d, i) => { if (JSON.stringify(d) !== JSON.stringify(a?.days?.[i])) days[i] = d; });
+  if (Object.keys(days).length) patch.days = days;
+  if (b.v !== a?.v) patch.v = b.v;
+  return Object.keys(patch).length ? patch : null;
+}
+export function applyPatch(plan, patch) {
+  const p = structuredClone(plan);
+  for (const k of PLAN_LISTS) {
+    const ch = patch?.[k];
+    if (!ch) continue;
+    const gone = new Set(ch.remove || []);
+    const list = (p[k] || []).filter((x) => !gone.has(x.id));
+    for (const x of ch.upsert || []) {
+      const i = list.findIndex((y) => y.id === x.id);
+      if (i >= 0) list[i] = x; else list.push(x);
+    }
+    p[k] = list;
+  }
+  for (const [i, d] of Object.entries(patch?.days || {})) if (+i >= 0 && +i < 7) p.days[+i] = d;
+  if (patch?.v) p.v = patch.v;
+  return p;
+}
+
 // ---------- Goals ----------
 const isDone = (wt, id) => !!wt?.[id]?.done;
 export const instanceId = (repeatId, week) => `${repeatId}@${week}`;
@@ -383,7 +423,9 @@ export function taskWarnings(plan, ticks, t, today) {
   if (days < 0) out.push({ k: 'late', text: 'past its due date' });
   else {
     if (parts.some((x) => x.date > t.due && !x.done)) out.push({ k: 'after', text: 'a day is after the due date' });
-    if (days <= 6 && !parts.some((x) => !x.done && x.date >= today && x.date <= t.due)) out.push({ k: 'none', text: 'no day planned before it’s due' });
+    // Every day it was put on is ticked: that reads as finished, not as "nothing planned".
+    const allTicked = parts.length > 0 && parts.every((x) => x.done);
+    if (days <= 6 && !allTicked && !parts.some((x) => !x.done && x.date >= today && x.date <= t.due)) out.push({ k: 'none', text: 'no day planned before it’s due' });
   }
   const pr = taskProgress(tt, t);
   if (pr.left > 0 && days >= 0 && (days <= 1 || (days <= 3 && pr.left * 2 > pr.of))) out.push({ k: 'behind', text: `${pr.left} of ${pr.of} questions left` });

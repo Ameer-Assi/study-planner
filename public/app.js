@@ -4,10 +4,10 @@ import {
   unplacedGoals, planningLeft, usualDays, usualSlots, copyWeek,
   DAY_START, DAY_END, toMin, fmtMin, fmtSpan, classMins, partMins, hasTime,
   TASKS, taskGoalId, qKey, allTasks, findTask, taskDone, taskGoals, taskProgress, openTasks, dueLabel, tasksToPlan, taskWarnings,
-  MAX_QUESTIONS, daysBetween, qsLabel, partNote, fullTitle, bareTitle, hasDue, dueBy, taskEnd,
+  MAX_QUESTIONS, daysBetween, qsLabel, partNote, fullTitle, bareTitle, hasDue, dueBy, taskEnd, diffPlan, applyPatch,
 } from './shared.js';
 
-const VERSION = '2.7.0';
+const VERSION = '2.8.0';
 // Preview mode: runs without a server and keeps everything on this device.
 const DEMO = !!globalThis.PLANNER_DEMO;
 const PRE = DEMO ? 'spd-' : 'sp-';
@@ -114,6 +114,7 @@ function prepare(s) {
 function applyOp(s, op) {
   if (op.type === 'tick') (s.ticks[op.week] ||= {})[op.item] = { done: op.done, updated: op.updated };
   else if (op.type === 'plan') { s.plan = op.plan; s.planUpdated = op.updated; }
+  else if (op.type === 'plan-patch') { s.plan = applyPatch(s.plan, op.patch); s.planUpdated = Math.max(s.planUpdated || 0, op.updated); }
   else if (op.type === 'settings') { s.settings = op.settings; s.settingsUpdated = op.updated; }
 }
 
@@ -179,7 +180,9 @@ function commitPlan(mutator) {
   const { week } = clock();
   ensureWeek(plan, week); ensureWeek(plan, addDays(week, 7));
   pruneGoals(plan, week, tticks());
-  commit({ type: 'plan', plan });
+  // Only what changed is sent, and the server merges it into its copy (see diffPlan).
+  const patch = diffPlan(store.state.plan, plan);
+  if (patch) commit({ type: 'plan-patch', patch });
 }
 function commitSettings(mutator) {
   const settings = structuredClone(store.state.settings);
@@ -365,6 +368,31 @@ function addGoal() {
   document.getElementById('g-title')?.focus({ preventScroll: true });
 }
 
+// Handed in: this week's session counts as done, and later weeks' sessions go.
+function handIn(t, auto) {
+  const s = store.state; const { week } = clock();
+  const ops = [tickOp(TASKS, t.id, true)];
+  for (const g of taskGoals(s.plan, t)) if (g.week === week && !goalDone(s.ticks[g.week], g)) ops.push(tickOp(g.week, g.id, true));
+  commit(...ops);
+  if (taskGoals(store.state.plan, t).some((g) => g.week > week)) commitPlan((p) => { p.goals = p.goals.filter((g) => !(g.taskId === t.id && g.week > week)); });
+  toast(auto ? `${fullTitle(t)}: all questions done, so it’s marked handed in` : `${fullTitle(t)}: handed in`);
+}
+// After ticking questions: once every question is done, the homework counts as handed in.
+function maybeHandIn(t) {
+  const tt = tticks();
+  const pr = taskProgress(tt, t);
+  if (pr.of && !pr.left && !taskDone(tt, t)) { handIn(t, true); return true; }
+  return false;
+}
+// A "Handed in" button for homework that looks finished: every day it was on is ticked.
+function handInBtn(t) {
+  const s = store.state;
+  if (taskDone(tticks(), t)) return '';
+  const parts = taskGoals(s.plan, t).flatMap((g) => g.parts.map((p) => partDone(s.ticks[g.week], g, p)));
+  if (!parts.length || !parts.every(Boolean)) return '';
+  return `<button type="button" class="btn small-btn" data-act="task-done" data-id="${esc(t.id)}">Handed in</button>`;
+}
+
 function saveTask() {
   const f = ui.taskForm; if (!f) return;
   const title = String(f.title || '').trim().slice(0, 120);
@@ -437,7 +465,7 @@ function goalHTML(g, week, opts = {}) {
       <span class="t">${sw(g.course)}<span>${esc(fullTitle(g))}</span>${repeatOf(s.plan, g) ? ICON_REPEAT : ''}</span>
       <span class="goal-sub">${dotsHTML(g, wt)}${done ? '<span class="tag ok">done</span>' : loose ? '<span class="tag warn">no day yet</span>' : ''}${task && !taskDone(tticks(), task) ? (hasDue(task) ? dueTag(task) : '') + progHTML(task) : ''}</span>
     </button>
-    ${task && opts.drag ? sameDaysBtn(task, week, g) : ''}
+    ${task && opts.drag ? sameDaysBtn(task, week, g) || handInBtn(task) : ''}
   </li>`;
 }
 
@@ -509,7 +537,7 @@ function taskRowHTML(t, week) {
       <span class="goal-sub">${done ? '<span class="tag ok">handed in</span>' : dueTag(t)}${progHTML(t)}${inWeek ? `<span class="tag">in ${esc(weekName(week).toLowerCase())}</span>` : ''}</span>
       ${warnsHTML(warns)}
     </button>
-    ${canAdd ? `<button type="button" class="btn small-btn" data-act="task-week" data-id="${esc(t.id)}" data-week="${esc(week)}">Add to week</button>` : ''}
+    ${handInBtn(t) || (canAdd ? `<button type="button" class="btn small-btn" data-act="task-week" data-id="${esc(t.id)}" data-week="${esc(week)}">Add to week</button>` : '')}
   </li>`;
 }
 
@@ -523,7 +551,7 @@ function taskTrayHTML(t, w) {
       <span class="goal-sub">${dueTag(t)}${progHTML(t)}<span class="tag">not in this week</span></span>
       ${warnsHTML(warns)}
     </button>
-    ${sameDaysBtn(t, w)}
+    ${handInBtn(t) || sameDaysBtn(t, w)}
   </li>`;
 }
 
@@ -1113,6 +1141,7 @@ function viewSettings() {
           : `<button type="button" class="btn ghost" data-act="confirm" data-key="rep-${esc(x.id)}">Stop</button>`}</li>`).join('')}</ul>` : '<p class="small muted">None. Tick “Every week” when you add a goal on the Plan screen.</p>'}
       <p class="small muted">These show up as goals every week, ready to put on days. Stopping one keeps the goals already in this week and next.</p>
     </section>
+    ${DEMO ? '' : historyHTML()}
     <section class="card"><h2>This device</h2>
       ${DEMO ? `<p class="small">Preview: everything you do here stays in this browser.</p>
         <div class="row">${ui.confirm === 'demo-reset'
@@ -1125,6 +1154,25 @@ function viewSettings() {
         : '<button type="button" class="btn ghost" data-act="confirm" data-key="signout">Sign out</button>'}</div>`}
       <p class="small muted">Version ${VERSION}.${DEMO ? '' : ' Your data lives in your Cloudflare database and syncs to every device with the app key.'}</p>
     </section>`;
+}
+
+// Earlier versions of the plan, kept by the server before every change. Restoring one brings
+// back its goals, homework and classes; ticks and questions done are kept as they are.
+function historyHTML() {
+  const hst = ui.history;
+  const when = (ms) => new Date(ms).toLocaleString('en-GB', { timeZone: 'Asia/Jerusalem', weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  let body;
+  if (!hst) body = '<div class="row"><button type="button" class="btn" data-act="history-load">Show earlier versions</button></div>';
+  else if (hst.loading) body = '<p class="small muted">Loading…</p>';
+  else if (hst.err) body = `<p class="msg err">${esc(hst.err)}</p>`;
+  else if (!hst.versions.length) body = '<p class="small muted">None yet. From now on, the plan as it was before each change is kept here.</p>';
+  else body = `<ul class="list">${hst.versions.map((v) => `<li style="align-items:center"><div class="grow"><b class="small">${esc(when(v.saved))}</b><div class="small muted">${plural(v.goals, 'goal')} · ${v.tasks} homework</div></div>
+      ${ui.confirm === 'restore-' + v.id
+        ? `<button type="button" class="btn danger" data-act="history-restore" data-id="${v.id}">Restore</button><button type="button" class="btn ghost" data-act="cancel-confirm">Cancel</button>`
+        : `<button type="button" class="btn ghost" data-act="confirm" data-key="restore-${v.id}">Restore</button>`}</li>`).join('')}</ul>`;
+  return `<section class="card"><h2>Earlier versions</h2>
+    <p class="small muted">If goals or homework go missing, bring back the plan as it was. Ticks and questions done stay as they are now. The current plan is kept here too, so a restore can be undone.</p>
+    ${body}</section>`;
 }
 
 // ---------- Setup ----------
@@ -1535,20 +1583,13 @@ document.addEventListener('click', async (e) => {
       const key = qKey(t, +el.dataset.q);
       const on = !tticks()[key]?.done;
       commit(tickOp(TASKS, key, on));
-      const pr = taskProgress(tticks(), t);
-      if (on && !pr.left && !taskDone(tticks(), t)) toast('All questions done. Mark it handed in when it’s sent.');
+      if (on) maybeHandIn(t);
       break;
     }
     case 'task-done': {
       const t = findTask(s.plan, el.dataset.id); if (!t) break;
-      if (!taskDone(tticks(), t)) {
-        // Handed in: this week's session counts as done, and later weeks don't need one.
-        const ops = [tickOp(TASKS, t.id, true)];
-        for (const g of taskGoals(s.plan, t)) if (g.week === week && !goalDone(s.ticks[g.week], g)) ops.push(tickOp(g.week, g.id, true));
-        commit(...ops);
-        if (taskGoals(store.state.plan, t).some((g) => g.week > week)) commitPlan((p) => { p.goals = p.goals.filter((g) => !(g.taskId === t.id && g.week > week)); });
-        toast(`${fullTitle(t)}: handed in`);
-      } else {
+      if (!taskDone(tticks(), t)) handIn(t, false);
+      else {
         const ops = [tickOp(TASKS, t.id, false)];
         for (const g of taskGoals(s.plan, t)) if (g.week >= week && s.ticks[g.week]?.[g.id]?.done) ops.push(tickOp(g.week, g.id, false));
         commit(...ops);
@@ -1667,6 +1708,25 @@ document.addEventListener('click', async (e) => {
     case 'goal-drop': commitPlan((p) => { const g = findGoal(p, el.dataset.id); g.deleted = true; }); toast('Dropped'); break;
     case 'repeat-stop': { const id = el.dataset.id; ui.confirm = null; commitPlan((p) => stopRepeat(p, id, null)); toast('Stopped repeating'); break; }
 
+    case 'history-load':
+      ui.history = { loading: true }; render();
+      try { ui.history = { versions: (await api('/api/history')).versions }; }
+      catch (err) { ui.history = { err: navigator.onLine ? err.message : 'Connect to the internet to see earlier versions.' }; }
+      render();
+      break;
+    case 'history-restore': {
+      ui.confirm = null;
+      try {
+        const r = await api(`/api/history?id=${encodeURIComponent(el.dataset.id)}`);
+        const plan = r.plan;
+        const { week } = clock();
+        ensureWeek(plan, week); ensureWeek(plan, addDays(week, 7));
+        commit({ type: 'plan', plan });
+        ui.history = null;
+        toast('Restored. The plan before this is in Earlier versions.');
+      } catch (err) { toast(`Couldn’t restore: ${err.message}`); }
+      break;
+    }
     case 'demo-reset': LS.del(PRE + 'state'); store.state = null; ui.confirm = null; await pull(); toast('Preview cleared'); break;
     case 'sync-now': ui.msgs.sync = null; await pull(); toast(ui.sync === 'ok' ? 'Synced' : 'Couldn’t sync'); break;
     case 'signout':
@@ -1723,6 +1783,7 @@ document.addEventListener('change', (e) => {
     const task = g && findTask(s.plan, g.taskId);
     if (task && f?.p.qs?.length) for (const q of f.p.qs) if (q <= (task.questions || 0)) ops.push(tickOp(TASKS, qKey(task, q), el.checked));
     commit(...ops);
+    if (el.checked && task && f?.p.qs?.length && maybeHandIn(task)) return;
     if (el.checked && g && !was && goalDone(store.state.ticks[week], g)) toast(g.parts.length > 1 ? `${fullTitle(g)}: all ${g.parts.length} parts done` : `${fullTitle(g)}: done`);
   } else if (act === 'add-course') {
     ui.addCourse = el.value;
