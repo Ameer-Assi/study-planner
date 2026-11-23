@@ -7,7 +7,7 @@ import {
   MAX_QUESTIONS, daysBetween, qsLabel, partNote, fullTitle, bareTitle, hasDue, dueBy, taskEnd, diffPlan, applyPatch,
 } from './shared.js';
 
-const VERSION = '2.8.0';
+const VERSION = '2.8.1';
 // Preview mode: runs without a server and keeps everything on this device.
 const DEMO = !!globalThis.PLANNER_DEMO;
 const PRE = DEMO ? 'spd-' : 'sp-';
@@ -368,29 +368,37 @@ function addGoal() {
   document.getElementById('g-title')?.focus({ preventScroll: true });
 }
 
-// Handed in: this week's session counts as done, and later weeks' sessions go.
+// Homework with a due date is "handed in"; homework with none is just "finished".
+const doneWord = (t) => (hasDue(t) ? 'handed in' : 'finished');
+// Handed in (or finished): this week's session counts as done, and later weeks' sessions go.
 function handIn(t, auto) {
   const s = store.state; const { week } = clock();
   const ops = [tickOp(TASKS, t.id, true)];
   for (const g of taskGoals(s.plan, t)) if (g.week === week && !goalDone(s.ticks[g.week], g)) ops.push(tickOp(g.week, g.id, true));
   commit(...ops);
   if (taskGoals(store.state.plan, t).some((g) => g.week > week)) commitPlan((p) => { p.goals = p.goals.filter((g) => !(g.taskId === t.id && g.week > week)); });
-  toast(auto ? `${fullTitle(t)}: all questions done, so it’s marked handed in` : `${fullTitle(t)}: handed in`);
+  toast(auto ? `${fullTitle(t)}: all questions done, so it’s finished` : `${fullTitle(t)}: ${doneWord(t)}`);
 }
-// After ticking questions: once every question is done, the homework counts as handed in.
+// After ticking questions, once every question is done: homework with no due date is finished.
+// Homework with a due date stays open until you mark it handed in, and says so.
 function maybeHandIn(t) {
   const tt = tticks();
   const pr = taskProgress(tt, t);
-  if (pr.of && !pr.left && !taskDone(tt, t)) { handIn(t, true); return true; }
-  return false;
+  if (!pr.of || pr.left || taskDone(tt, t)) return false;
+  if (!hasDue(t)) { handIn(t, true); return true; }
+  toast(`${fullTitle(t)}: all questions done. Mark it handed in once it’s sent.`);
+  return true;
 }
-// A "Handed in" button for homework that looks finished: every day it was on is ticked.
+// A "Handed in" (or "Finished") button for homework that looks done: every question, or
+// every day it was on, is ticked.
 function handInBtn(t) {
   const s = store.state;
-  if (taskDone(tticks(), t)) return '';
+  const tt = tticks();
+  if (taskDone(tt, t)) return '';
+  const pr = taskProgress(tt, t);
   const parts = taskGoals(s.plan, t).flatMap((g) => g.parts.map((p) => partDone(s.ticks[g.week], g, p)));
-  if (!parts.length || !parts.every(Boolean)) return '';
-  return `<button type="button" class="btn small-btn" data-act="task-done" data-id="${esc(t.id)}">Handed in</button>`;
+  if (!(pr.of && !pr.left) && (!parts.length || !parts.every(Boolean))) return '';
+  return `<button type="button" class="btn small-btn${hasDue(t) ? ' primary' : ''}" data-act="task-done" data-id="${esc(t.id)}">${hasDue(t) ? 'Handed in' : 'Finished'}</button>`;
 }
 
 function saveTask() {
@@ -534,7 +542,7 @@ function taskRowHTML(t, week) {
   return `<li class="goal task${done ? ' done' : ''}">
     <button type="button" class="goal-body" data-act="open-task" data-id="${esc(t.id)}">
       <span class="t">${sw(t.course)}<span>${esc(fullTitle(t))}</span></span>
-      <span class="goal-sub">${done ? '<span class="tag ok">handed in</span>' : dueTag(t)}${progHTML(t)}${inWeek ? `<span class="tag">in ${esc(weekName(week).toLowerCase())}</span>` : ''}</span>
+      <span class="goal-sub">${done ? `<span class="tag ok">${doneWord(t)}</span>` : dueTag(t)}${progHTML(t)}${inWeek ? `<span class="tag">in ${esc(weekName(week).toLowerCase())}</span>` : ''}</span>
       ${warnsHTML(warns)}
     </button>
     ${handInBtn(t) || (canAdd ? `<button type="button" class="btn small-btn" data-act="task-week" data-id="${esc(t.id)}" data-week="${esc(week)}">Add to week</button>` : '')}
@@ -621,7 +629,7 @@ function taskSheetHTML(t) {
     : '<button type="button" class="btn ghost danger" data-act="confirm" data-key="del-task">Delete</button>';
   return `<div class="scrim" data-act="sheet-close"></div>
   <section class="sheet" role="dialog" aria-modal="true" aria-label="Homework">
-    <div class="card-head"><p class="label">Homework · ${esc(done ? 'handed in' : dueLabel(t.due, today))}</p><button type="button" class="btn primary" data-act="sheet-close">Done</button></div>
+    <div class="card-head"><p class="label">Homework · ${esc(done ? doneWord(t) : dueLabel(t.due, today))}</p><button type="button" class="btn primary" data-act="sheet-close">Done</button></div>
     <label class="field"><span>Homework</span><input type="text" id="ts-title" data-act="task-title" data-id="${id}" value="${esc(t.title)}" autocomplete="off"></label>
     <div class="row">
       <label class="field"><span>Due</span>${hasDue(t) ? `<input type="date" id="ts-due" data-act="task-due" data-id="${id}" value="${esc(t.due)}">` : '<div class="nodue">No due date</div>'}</label>
@@ -642,7 +650,7 @@ function taskSheetHTML(t) {
       ${adds.length ? `<div class="row">${adds.map((w) => `<button type="button" class="btn" data-act="task-week" data-id="${id}" data-week="${esc(w)}">Add to ${esc(weekName(w).toLowerCase())}</button>`).join('')}</div>` : ''}
     </div>
     <div class="row between">
-      <button type="button" class="btn${!done && pr.of && !pr.left ? ' primary' : ''}" data-act="task-done" data-id="${id}">${done ? 'Not handed in yet' : 'Mark handed in'}</button>
+      <button type="button" class="btn${!done && pr.of && !pr.left ? ' primary' : ''}" data-act="task-done" data-id="${id}">${hasDue(t) ? (done ? 'Not handed in yet' : 'Mark handed in') : (done ? 'Not finished yet' : 'Mark finished')}</button>
       <div class="row tight">${del}</div>
     </div>
   </section>`;
@@ -750,7 +758,7 @@ function viewPlan() {
   const tray = `<section class="card tray" data-drop="tray">
     <div class="card-head"><h2>Goals</h2><span class="small ${loose || outside ? 'warn-text' : 'muted'}">${esc(headStatus)}</span></div>
     <div class="row between sect"><p class="label">Homework</p><div class="row tight">
-      ${handedIn.length ? `<button type="button" class="btn ghost" data-act="done-toggle">${ui.doneOpen ? 'Hide' : 'Handed in'} (${handedIn.length})</button>` : ''}
+      ${handedIn.length ? `<button type="button" class="btn ghost" data-act="done-toggle">${ui.doneOpen ? 'Hide' : 'Done'} (${handedIn.length})</button>` : ''}
       ${ui.taskForm ? '' : '<button type="button" class="btn ghost" data-act="task-new">Add homework</button>'}</div></div>
     ${hwRows.length ? `<ul class="goals">${hwRows.join('')}</ul>` : '<p class="small muted">No open homework. Add it when it’s published, with its due date.</p>'}
     ${ui.taskForm ? taskFormHTML() : ''}
@@ -1028,10 +1036,10 @@ function sheetHTML() {
         ${hasTime(p) ? `<button type="button" class="btn ghost" data-act="part-untime" data-id="${esc(p.id)}">No time</button>` : ''}
       </div></div>`).join('')}
     ${task ? `<div class="hwbox">
-        <div class="row between"><span class="goal-sub nopad">${taskDone(tticks(), task) ? '<span class="tag ok">handed in</span>' : dueTag(task)}${progHTML(task)}</span>
+        <div class="row between"><span class="goal-sub nopad">${taskDone(tticks(), task) ? `<span class="tag ok">${doneWord(task)}</span>` : dueTag(task)}${progHTML(task)}</span>
           <button type="button" class="btn ghost" data-act="open-task" data-id="${tid}">Homework</button></div>
         ${questionsHTML(task)}
-        <p class="small muted">Ticking a day means you worked on it. The homework stays open across weeks until you mark it handed in.</p>
+        <p class="small muted">Ticking a day means you worked on it. The homework stays open across weeks until you mark it ${hasDue(task) ? 'handed in' : 'finished'}.</p>
       </div>`
       : `<label class="toggle"><input type="checkbox" id="s-rep" data-act="goal-repeat" data-id="${id}"${rep ? ' checked' : ''}> Repeat every week</label>`}
     <div class="row between">

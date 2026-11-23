@@ -52,7 +52,10 @@ export const TRACKED = Object.keys(COURSES);
 // Picks the course a goal's title is about ("Probability HW" -> prob), or '' for general.
 export function guessCourse(title) {
   const t = ` ${String(title).toLowerCase().replace(/[^a-z0-9]+/g, ' ')} `;
-  for (const k of TRACKED) if ([...COURSES[k].words, ...(COURSES[k].topics || [])].some((w) => t.includes(` ${w} `) || (w.length > 4 && t.includes(w)))) return k;
+  const hit = (w) => t.includes(` ${w} `) || (w.length > 4 && t.includes(w));
+  // A course's own name wins over a topic: "Organization webwork" is Organization.
+  for (const k of TRACKED) if (COURSES[k].words.some(hit)) return k;
+  for (const k of TRACKED) if ((COURSES[k].topics || []).some(hit)) return k;
   return '';
 }
 
@@ -418,6 +421,9 @@ export function taskWarnings(plan, ticks, t, today) {
   if (taskDone(tt, t) || !hasDue(t)) return [];
   const out = [];
   const days = daysBetween(today, t.due);
+  // Every question is done but it isn't handed in yet: that's the only thing left to say.
+  const pr0 = taskProgress(tt, t);
+  if (pr0.of && !pr0.left) return [{ k: 'handin', text: days < 0 ? 'all questions done, but it wasn’t handed in' : 'all questions done, not handed in yet' }];
   const parts = [];
   for (const g of taskGoals(plan, t)) for (const p of g.parts) parts.push({ date: addDays(g.week, p.day), done: partDone(ticks?.[g.week], g, p) });
   if (days < 0) out.push({ k: 'late', text: 'past its due date' });

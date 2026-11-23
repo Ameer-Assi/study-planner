@@ -198,7 +198,8 @@ export async function buildReminder(env, when, slot) {
   // Homework due today or tomorrow, with the questions still open.
   const dueSoon = openTasks(plan, tt).filter((t) => { if (!hasDue(t)) return false; const n = daysBetween(today, t.due); return n >= 0 && n <= 1; }).map((t) => {
     const pr = taskProgress(tt, t);
-    return `${fullTitle(t)} due ${t.due === today ? 'today' : 'tomorrow'}${pr.left ? ` (${plural(pr.left, 'question')} left)` : ''}`;
+    const state = pr.left ? ` (${plural(pr.left, 'question')} left)` : pr.of ? ' (done, hand it in)' : '';
+    return `${fullTitle(t)} due ${t.due === today ? 'today' : 'tomorrow'}${state}`;
   });
 
   if (slot === 'morning') {
