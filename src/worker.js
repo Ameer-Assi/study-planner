@@ -15,6 +15,9 @@ const SCHEMA = [
   'CREATE TABLE IF NOT EXISTS plan_history (saved INTEGER NOT NULL, json TEXT NOT NULL)',
 ];
 const KEEP_HISTORY = 60;
+// Changes within this long of the last kept version count as one round of edits, so a busy
+// planning session doesn't push older versions out of the 60 kept.
+const HISTORY_GAP = 10 * 60 * 1000;
 let schemaReady = false;
 async function ensureSchema(db) {
   if (schemaReady) return;
@@ -83,24 +86,45 @@ async function handleState(env, url) {
 const isStr = (v, max = 2000) => typeof v === 'string' && v.length <= max;
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 
+// The plan as it was before a change goes into the history, at most once per round of edits.
+async function historyDue(db) {
+  const row = await db.prepare("SELECT updated FROM kv WHERE key = 'history-at'").first();
+  return !row || Date.now() - row.updated >= HISTORY_GAP;
+}
+function historyStmts(db, plan) {
+  const now = Date.now();
+  return [
+    db.prepare('INSERT INTO plan_history (saved, json) VALUES (?, ?)').bind(plan.updated || now, JSON.stringify(plan.value)),
+    db.prepare("INSERT INTO kv (key, value, updated) VALUES ('history-at', 'true', ?1) ON CONFLICT(key) DO UPDATE SET updated = excluded.updated").bind(now),
+  ];
+}
+
 async function handleSync(request, env) {
   const body = await request.json().catch(() => null);
   if (!body || !Array.isArray(body.ops) || body.ops.length > 500) return json({ error: 'Bad request' }, 400);
   const db = env.DB;
   const stmts = [];
-  // Patches are applied in order to the stored plan, and it's written once at the end.
-  let merged = null, before = null;
-  for (const op of body.ops) {
-    if (op?.type === 'plan-patch' && op.patch && typeof op.patch === 'object' && isNum(op.updated)) {
-      if (!merged) { const { plan } = await loadCore(db); before = plan; merged = { plan: plan.value, updated: plan.updated }; }
-      merged.plan = applyPatch(merged.plan, op.patch);
-      merged.updated = Math.max(merged.updated, op.updated);
-    }
+  // Patches are applied in order to the stored plan, and it's written once. The write only
+  // goes through if nobody saved the plan in between (another device syncing at the same
+  // moment); otherwise it reads the plan again and reapplies the patches.
+  const patches = body.ops.filter((op) => op?.type === 'plan-patch' && op.patch && typeof op.patch === 'object' && isNum(op.updated));
+  let saved = !patches.length;
+  for (let attempt = 0; patches.length && attempt < 10; attempt++) {
+    const { plan: before } = await loadCore(db);
+    // Always later than the version read, so the check below can tell two saves apart.
+    let plan = before.value, updated = before.updated + 1;
+    for (const op of patches) { plan = applyPatch(plan, op.patch); updated = Math.max(updated, op.updated); }
+    if (JSON.stringify(plan).length >= 200000) { saved = true; break; }
+    const res = await db.prepare(
+      'INSERT INTO kv (key, value, updated) VALUES (?1, ?2, ?3) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated = excluded.updated WHERE kv.updated = ?4 RETURNING updated',
+    ).bind('plan', JSON.stringify(plan), updated, before.updated).first();
+    if (!res) continue;
+    if (await historyDue(db)) stmts.push(...historyStmts(db, before));
+    saved = true;
+    break;
   }
-  if (merged && JSON.stringify(merged.plan).length < 200000) {
-    stmts.push(db.prepare('INSERT INTO plan_history (saved, json) VALUES (?, ?)').bind(before.updated || Date.now(), JSON.stringify(before.value)));
-    stmts.push(putKV(db, 'plan', merged.plan, merged.updated));
-  }
+  // Still busy after every retry: nothing is applied, and the phone keeps its changes and sends them again.
+  if (!saved) return json({ error: 'The plan was busy saving, try again' }, 503);
   for (const op of body.ops) {
     if (!op || !isNum(op.updated)) continue;
     if (op.type === 'tick' && isStr(op.week, 40) && isStr(op.item, 80)) {
@@ -118,8 +142,9 @@ async function handleSync(request, env) {
     } else if (op.type === 'plan' && op.plan && Array.isArray(op.plan.days) && op.plan.days.length === 7) {
       // A whole plan: sent by an older copy of the app, or by "Restore" in Settings.
       if (JSON.stringify(op.plan).length < 200000) {
+        // Always kept, so a restore can itself be undone.
         const cur = await getKV(db, 'plan', null);
-        if (cur.updated) stmts.push(db.prepare('INSERT INTO plan_history (saved, json) VALUES (?, ?)').bind(cur.updated, JSON.stringify(cur.value)));
+        if (cur.updated) stmts.push(...historyStmts(db, cur));
         stmts.push(putKV(db, 'plan', op.plan, op.updated));
       }
     } else if (op.type === 'settings' && op.settings && Array.isArray(op.settings.exams)) {

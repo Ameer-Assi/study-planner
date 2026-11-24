@@ -298,6 +298,7 @@ export function copyWeek(plan, from, to, newId, keepTask = () => true) {
       const id = taskGoalId(task.id, to);
       t = plan.goals.find((x) => x.id === id);
       if (!t) { t = { id, title: task.title, course: task.course, week: to, taskId: task.id, parts: [] }; plan.goals.push(t); }
+      delete t.byHandIn;
     } else if (r && r.since <= to) {
       const id = instanceId(r.id, to);
       t = plan.goals.find((x) => x.id === id);

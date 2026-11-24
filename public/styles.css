@@ -312,6 +312,8 @@ ol.steps-list { margin: 0; padding-left: 20px; display: flex; flex-direction: co
 @media (prefers-reduced-motion: no-preference) {
   .card, .dock-day { transition: background-color .12s; }
 }
+.toast.has-act { pointer-events: auto; display: flex; width: min(calc(100% - 32px), 440px); box-sizing: border-box; align-items: center; gap: 12px; text-align: left; }
+.toast-btn { flex: none; margin-left: auto; background: var(--bg); color: var(--fg); border: 0; border-radius: 8px; padding: 6px 10px; font: inherit; font-weight: 600; }
 body.has-sheet .toast { bottom: auto; top: calc(env(safe-area-inset-top, 0px) + 12px); }
 
 /* Deadlines */
