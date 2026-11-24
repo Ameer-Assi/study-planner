@@ -7,7 +7,7 @@ import {
   MAX_QUESTIONS, daysBetween, qsLabel, partNote, fullTitle, bareTitle, hasDue, dueBy, taskEnd, diffPlan, applyPatch,
 } from './shared.js';
 
-const VERSION = '2.8.1';
+const VERSION = '2.8.2';
 // Preview mode: runs without a server and keeps everything on this device.
 const DEMO = !!globalThis.PLANNER_DEMO;
 const PRE = DEMO ? 'spd-' : 'sp-';
@@ -373,7 +373,8 @@ const doneWord = (t) => (hasDue(t) ? 'handed in' : 'finished');
 // Handed in (or finished): this week's session counts as done, and later weeks' sessions go.
 function handIn(t, auto) {
   const s = store.state; const { week } = clock();
-  const ops = [tickOp(TASKS, t.id, true)];
+  // Handed in means every question is done.
+  const ops = [tickOp(TASKS, t.id, true), ...qOps(t, qsLeft(t), true)];
   for (const g of taskGoals(s.plan, t)) if (g.week === week && !goalDone(s.ticks[g.week], g)) ops.push(tickOp(g.week, g.id, true));
   commit(...ops);
   if (taskGoals(store.state.plan, t).some((g) => g.week > week)) commitPlan((p) => { p.goals = p.goals.filter((g) => !(g.taskId === t.id && g.week > week)); });
@@ -387,6 +388,24 @@ function maybeHandIn(t) {
   if (!pr.of || pr.left || taskDone(tt, t)) return false;
   if (!hasDue(t)) { handIn(t, true); return true; }
   toast(`${fullTitle(t)}: all questions done. Mark it handed in once it’s sent.`);
+  return true;
+}
+// Ticks (or unticks) these questions of a homework.
+const qOps = (t, qs, on) => (qs || []).filter((q) => q >= 1 && q <= Math.min(MAX_QUESTIONS, t.questions || 0)).map((q) => tickOp(TASKS, qKey(t, q), on));
+// Questions not ticked yet.
+const qsLeft = (t, tt = tticks()) => Array.from({ length: taskProgress(tt, t).of }, (_, i) => i + 1).filter((q) => !tt[qKey(t, q)]?.done);
+// Every day the homework was put on is ticked, and it's due before next week, so no
+// more days can come: the questions still open (on no day, or given to a day after it
+// was ticked) are done too. Ticks them and says which; false when there's nothing to do.
+function finishLeftQs(t) {
+  const s = store.state; const tt = tticks();
+  if (!t.questions || taskDone(tt, t) || !hasDue(t) || t.due >= addDays(clock().week, 7)) return false;
+  const parts = taskGoals(s.plan, t).flatMap((g) => g.parts.map((p) => partDone(s.ticks[g.week], g, p)));
+  if (!parts.length || !parts.every(Boolean)) return false;
+  const left = qsLeft(t, tt);
+  if (!left.length) return false;
+  commit(...qOps(t, left, true));
+  toast(`${fullTitle(t)}: every day is done, so ${qsLabel(left)} ${left.length > 1 ? 'are' : 'is'} done too. Mark it handed in once it’s sent.`);
   return true;
 }
 // A "Handed in" (or "Finished") button for homework that looks done: every question, or
@@ -1577,6 +1596,12 @@ document.addEventListener('click', async (e) => {
         if (!had) x.qs.push(q);
         for (const y of g.parts) { y.qs.sort((a, b) => a - b); if (!y.qs.length) delete y.qs; }
       });
+      // Given to a day that's already ticked: that question is done.
+      const task = findTask(s.plan, f.g.taskId);
+      if (task && (findPart(store.state.plan, f.p.id)?.p.qs || []).includes(q) && partDone(store.state.ticks[f.g.week], f.g, f.p) && !tticks()[qKey(task, q)]?.done) {
+        commit(...qOps(task, [q], true));
+        maybeHandIn(task);
+      }
       break;
     }
     case 'task-layout': placeLayout(el.dataset.id, el.dataset.week); break;
@@ -1683,8 +1708,14 @@ document.addEventListener('click', async (e) => {
     case 'goal-whole': {
       const g = findGoal(s.plan, el.dataset.id); if (!g) break;
       const wt = s.ticks[g.week] || {};
-      if (goalDone(wt, g)) commit(tickOp(g.week, g.id, false), ...g.parts.filter((p) => wt[p.id]?.done).map((p) => tickOp(g.week, p.id, false)));
-      else { commit(tickOp(g.week, g.id, true)); toast(`${fullTitle(g)}: done`); }
+      // Homework: its days' questions go with them.
+      const task = findTask(s.plan, g.taskId);
+      const qsOf = (parts) => (task ? qOps(task, parts.flatMap((p) => p.qs || []), !goalDone(wt, g)) : []);
+      if (goalDone(wt, g)) commit(tickOp(g.week, g.id, false), ...g.parts.filter((p) => wt[p.id]?.done).map((p) => tickOp(g.week, p.id, false)), ...qsOf(g.parts));
+      else {
+        commit(tickOp(g.week, g.id, true), ...qsOf(g.parts.filter((p) => !wt[p.id]?.done)));
+        if (!task || !(finishLeftQs(task) || maybeHandIn(task))) toast(`${fullTitle(g)}: done`);
+      }
       break;
     }
     case 'goal-skip': {
@@ -1789,9 +1820,9 @@ document.addEventListener('change', (e) => {
     // A homework day with questions: ticking it ticks them too (and unticking unticks them).
     const f = findPart(s.plan, item);
     const task = g && findTask(s.plan, g.taskId);
-    if (task && f?.p.qs?.length) for (const q of f.p.qs) if (q <= (task.questions || 0)) ops.push(tickOp(TASKS, qKey(task, q), el.checked));
+    if (task && f?.p.qs?.length) ops.push(...qOps(task, f.p.qs, el.checked));
     commit(...ops);
-    if (el.checked && task && f?.p.qs?.length && maybeHandIn(task)) return;
+    if (el.checked && task && (finishLeftQs(task) || (f?.p.qs?.length && maybeHandIn(task)))) return;
     if (el.checked && g && !was && goalDone(store.state.ticks[week], g)) toast(g.parts.length > 1 ? `${fullTitle(g)}: all ${g.parts.length} parts done` : `${fullTitle(g)}: done`);
   } else if (act === 'add-course') {
     ui.addCourse = el.value;
